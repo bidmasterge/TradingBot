@@ -611,8 +611,6 @@ class TradingApp:
         self._update_check_task = asyncio.run_coroutine_threadsafe(self._update_check_loop(), self.loop)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.log("Save an API, add coin pairs, choose a market, then Connect.")
-        if "--smoke" not in sys.argv and self._selected_api() is not None:
-            self.root.after(150, self.on_connect_toggle)
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
