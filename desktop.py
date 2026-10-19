@@ -880,24 +880,24 @@ class TradingApp:
         orders_pane.pack(fill="both", expand=True)
         orders_head = tk.Frame(orders_pane, bg=CARD)
         orders_head.pack(fill="x", padx=16, pady=(10, 4))
-        tk.Label(orders_head, text="Open orders", bg=CARD, fg=FG, font=(SANS, 11, "bold")).pack(side="left")
-        self.order_count_badge = tk.Label(orders_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 9), padx=6)
+        tk.Label(orders_head, text="Open orders", bg=CARD, fg=FG, font=(SANS, 14, "bold")).pack(side="left")
+        self.order_count_badge = tk.Label(orders_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 12, "bold"), padx=8)
         self.order_count_badge.pack(side="left", padx=(8, 0))
         self.refresh_btn = self._btn(orders_head, "Refresh", self.on_refresh, "ghost")
         self.refresh_btn.pack(side="right")
         table = tk.Frame(orders_pane, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
         table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         columns = ("id", "symbol", "side", "position", "price", "qty", "status", "action")
-        self.tree = ttk.Treeview(table, columns=columns, show="headings", height=6)
+        self.tree = ttk.Treeview(table, columns=columns, show="headings", height=5)
         for col, title, width, anchor in (
-            ("id", "ORDER ID", 120, "w"),
-            ("symbol", "SYMBOL", 85, "w"),
-            ("side", "SIDE", 55, "w"),
-            ("position", "POSITION", 75, "w"),
-            ("price", "PRICE", 85, "e"),
-            ("qty", "QUANTITY", 85, "e"),
-            ("status", "STATUS", 75, "w"),
-            ("action", "CANCEL", 75, "center"),
+            ("id", "ORDER ID", 150, "w"),
+            ("symbol", "SYMBOL", 115, "w"),
+            ("side", "SIDE", 75, "w"),
+            ("position", "POSITION", 95, "w"),
+            ("price", "PRICE", 115, "e"),
+            ("qty", "QUANTITY", 115, "e"),
+            ("status", "STATUS", 95, "w"),
+            ("action", "CANCEL", 110, "center"),
         ):
             self.tree.heading(col, text=title)
             self.tree.column(col, width=width, anchor=anchor)
@@ -910,7 +910,7 @@ class TradingApp:
         scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
-        self.empty_orders = tk.Label(table, text="Connect to load open orders", bg=INPUT, fg=MUTED_FG, font=(SANS, 10))
+        self.empty_orders = tk.Label(table, text="Connect to load open orders", bg=INPUT, fg=MUTED_FG, font=(SANS, 13))
         self.empty_orders.place(relx=0.5, rely=0.55, anchor="center")
         self.empty_orders.lift()
 
@@ -919,24 +919,24 @@ class TradingApp:
         pos_pane.pack(fill="both", expand=True)
         pos_head = tk.Frame(pos_pane, bg=CARD)
         pos_head.pack(fill="x", padx=16, pady=(8, 4))
-        tk.Label(pos_head, text="Open positions", bg=CARD, fg=FG, font=(SANS, 11, "bold")).pack(side="left")
-        self.pos_count_badge = tk.Label(pos_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 9), padx=6)
+        tk.Label(pos_head, text="Open positions", bg=CARD, fg=FG, font=(SANS, 14, "bold")).pack(side="left")
+        self.pos_count_badge = tk.Label(pos_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 12, "bold"), padx=8)
         self.pos_count_badge.pack(side="left", padx=(8, 0))
         self.pos_refresh_btn = self._btn(pos_head, "Refresh", self.on_refresh, "ghost")
         self.pos_refresh_btn.pack(side="right")
         pos_table = tk.Frame(pos_pane, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
         pos_table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         pos_cols = ("symbol", "side", "size", "entry", "mark", "pnl", "limit_close", "market_close")
-        self.pos_tree = ttk.Treeview(pos_table, columns=pos_cols, show="headings", height=5)
+        self.pos_tree = ttk.Treeview(pos_table, columns=pos_cols, show="headings", height=4)
         for col, title, width, anchor in (
-            ("symbol", "SYMBOL", 85, "w"),
-            ("side", "SIDE", 65, "w"),
-            ("size", "SIZE (USDT)", 95, "e"),
-            ("entry", "ENTRY", 85, "e"),
-            ("mark", "MARK", 85, "e"),
-            ("pnl", "PNL (USDT)", 90, "e"),
-            ("limit_close", "LIMIT", 75, "center"),
-            ("market_close", "MARKET", 80, "center"),
+            ("symbol", "SYMBOL", 115, "w"),
+            ("side", "SIDE", 85, "w"),
+            ("size", "SIZE (USDT)", 130, "e"),
+            ("entry", "ENTRY", 115, "e"),
+            ("mark", "MARK", 115, "e"),
+            ("pnl", "PNL (USDT)", 125, "e"),
+            ("limit_close", "LIMIT", 100, "center"),
+            ("market_close", "MARKET", 105, "center"),
         ):
             self.pos_tree.heading(col, text=title)
             self.pos_tree.column(col, width=width, anchor=anchor)
@@ -949,7 +949,7 @@ class TradingApp:
         self.pos_tree.configure(yscrollcommand=pos_scroll.set)
         pos_scroll.pack(side="right", fill="y")
         self.empty_positions = tk.Label(
-            pos_table, text="Connect to load open positions", bg=INPUT, fg=MUTED_FG, font=(SANS, 10)
+            pos_table, text="Connect to load open positions", bg=INPUT, fg=MUTED_FG, font=(SANS, 13)
         )
         self.empty_positions.place(relx=0.5, rely=0.55, anchor="center")
         self.empty_positions.lift()
@@ -1086,15 +1086,16 @@ class TradingApp:
             fieldbackground=INPUT,
             foreground=FG,
             borderwidth=0,
-            rowheight=28,
-            font=(MONO, 9),
+            rowheight=46,
+            font=(MONO, 15, "bold"),
         )
         style.configure(
             "Treeview.Heading",
             background=MUTED,
             foreground=MUTED_FG,
             relief="flat",
-            font=(SANS, 8, "bold"),
+            padding=(6, 8),
+            font=(SANS, 11, "bold"),
         )
         style.map("Treeview", background=[("selected", "#3d3824")], foreground=[("selected", FG)])
         style.configure("TCheckbutton", background=CARD, foreground=FG)
