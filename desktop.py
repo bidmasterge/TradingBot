@@ -564,6 +564,7 @@ class TradingApp:
         self._stop_multi = False
         self._closing = False
         self._guard_task: asyncio.Task | None = None
+        self._account_task: asyncio.Task | None = None
         self._book_task: asyncio.Task | None = None
         self._update_check_task: asyncio.Task | None = None
         self._update_available: str | None = None
@@ -1663,6 +1664,7 @@ class TradingApp:
         self.last_price.set("—")
         self.distance_text.set("")
         self._show_positions([])
+        self._render_order_rows([])
         self._sync_quote()
         self.log("Disconnected.", "warn")
         self._refresh_buttons()
@@ -1799,39 +1801,14 @@ class TradingApp:
         self.spawn(self._open(), self._show_orders)
 
     def _show_orders(self, rows: object, announce: bool = True) -> None:
-        self.tree.delete(*self.tree.get_children())
         if not isinstance(rows, list):
             self.log("Unexpected open-order reply.")
             self._refresh_buttons()
             return
-        for row in rows:
-            side = str(row.get("side", ""))
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    row.get("orderId", ""),
-                    row.get("symbol", ""),
-                    side,
-                    row.get("positionSide") or "—",
-                    row.get("price", ""),
-                    row.get("origQty", ""),
-                    row.get("status", ""),
-                    "✕ Cancel",
-                ),
-                tags=("buy" if side == "BUY" else "sell",),
-            )
-        count = len(rows)
-        self.order_count_badge.configure(text=str(count))
-        if count:
-            self.empty_orders.place_forget()
-        else:
-            self.empty_orders.configure(text="No open orders" if self.connected else "Connect to load open orders")
-            self.empty_orders.place(relx=0.5, rely=0.55, anchor="center")
-            self.empty_orders.lift()
+        self._render_order_rows(rows)
         if announce:
-            self.log(f"Open orders: {count}")
-            self.root.after(0, self._request_balance)
+            self.log(f"Open orders: {len(rows)}")
+        self.root.after(0, self._request_balance)
         self._refresh_buttons()
 
     def on_select_order(self, _event: object) -> None:
@@ -2003,18 +1980,20 @@ class TradingApp:
         self.client = client
         self._stop_multi = False
         self._guard_task = asyncio.create_task(self._guard_loop(market))
+        self._account_task = asyncio.create_task(self._account_sync_loop())
         return {"offset": client.clock_offset_ms, "market": client.market}
 
     async def _disconnect_ws(self) -> None:
         self._stop_multi = True
-        task = self._guard_task
+        for task in (self._guard_task, self._account_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         self._guard_task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        self._account_task = None
         if self._protected or self._kept:
             self._protected.clear()
             self._kept.clear()
@@ -2352,22 +2331,76 @@ class TradingApp:
         return Decimal(0)
 
     def _request_balance(self) -> None:
-        if self.connected and not self.busy:
-            self.spawn(self._balance_value(), self._show_balance)
+        if not self.connected or self.client is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._sync_account_state(include_orders=False, delay=0.0), self.loop)
+        asyncio.run_coroutine_threadsafe(self._sync_account_state(include_orders=True, delay=0.35), self.loop)
 
-    async def _balance_value(self) -> tuple[Decimal | None, list]:
+    async def _sync_account_state(self, include_orders: bool = False, delay: float = 0.0) -> None:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if not self.connected or self.client is None:
+            return
         market = "futures" if self.market.get() == "Futures" else "spot"
-        free = await self._spendable(market, "USDT")
-        positions = await self._need_client().open_positions() if market == "futures" else []
-        return free, positions
+        try:
+            free = await self._spendable(market, "USDT")
+            positions = await self._need_client().open_positions() if market == "futures" else []
+            rows = await self._open() if include_orders else None
+        except Exception:
+            return
+        if not self.connected or self.client is None:
+            return
+        self.root.after(0, lambda f=free, p=positions, r=rows: self._apply_account_state(f, p, r))
 
-    def _show_balance(self, data: tuple[Decimal | None, list]) -> None:
-        free, positions = data
-        self._balance_val = free
-        self.balance_text.set("—" if free is None else f"{free:,.2f}")
+    def _apply_account_state(self, free: Decimal | None, positions: list, rows: list | None) -> None:
+        if not self.connected:
+            return
+        if free is not None:
+            self._balance_val = free
+            self.balance_text.set(f"{free:,.2f}")
         self._show_positions(positions)
+        if rows is not None:
+            self._render_order_rows(rows)
         self._sync_quote()
         self._refresh_buttons()
+
+    def _render_order_rows(self, rows: list) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            side = str(row.get("side", ""))
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("orderId", ""),
+                    row.get("symbol", ""),
+                    side,
+                    row.get("positionSide") or "—",
+                    row.get("price", ""),
+                    row.get("origQty", ""),
+                    row.get("status", ""),
+                    "✕ Cancel",
+                ),
+                tags=("buy" if side == "BUY" else "sell",),
+            )
+        count = len(rows)
+        self.order_count_badge.configure(text=str(count))
+        if count:
+            self.empty_orders.place_forget()
+        else:
+            self.empty_orders.configure(text="No open orders" if self.connected else "Connect to load open orders")
+            self.empty_orders.place(relx=0.5, rely=0.55, anchor="center")
+            self.empty_orders.lift()
+
+    async def _account_sync_loop(self) -> None:
+        try:
+            while self.client is not None and not self._closing:
+                await asyncio.sleep(2.5)
+                if self.client is None or self._closing:
+                    break
+                await self._sync_account_state(include_orders=True, delay=0.0)
+        except asyncio.CancelledError:
+            raise
 
     async def _pause(self, seconds: int) -> bool:
         remaining = float(seconds)
@@ -2536,12 +2569,8 @@ class TradingApp:
         await self._refresh_open(order["symbol"])
 
     async def _refresh_open(self, symbol: str = "") -> None:
-        try:
-            rows = await self._open()
-            positions = await self._need_client().open_positions() if self.market.get() == "Futures" else []
-        except Exception:
-            return
-        self.root.after(0, lambda rows=rows, positions=positions: (self._show_orders(rows, announce=False), self._show_positions(positions)))
+        await self._sync_account_state(include_orders=True, delay=0.0)
+        await self._sync_account_state(include_orders=True, delay=0.35)
 
     async def _price(self, symbol: str) -> str:
         return await self._need_client().last_price(symbol)
