@@ -185,7 +185,7 @@ def save_config(data: dict) -> None:
 
 
 def load_update_config() -> dict:
-    data = {"repo": "bidmasterge/TradingBot", "branch": "main", "token": ""}
+    data = {"repo": "bidmasterge/TradingBot", "branch": "main", "version": "1.0.0", "token": ""}
     if UPDATE_CONFIG_PATH.exists():
         try:
             loaded = json.loads(UPDATE_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -198,6 +198,33 @@ def load_update_config() -> dict:
 
 def save_update_config(data: dict) -> None:
     UPDATE_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _ver_tuple(ver: str) -> tuple[int, ...]:
+    nums = [int(x) for x in re.findall(r"\d+", ver or "0")]
+    return tuple(nums) if nums else (0,)
+
+
+def check_remote_version() -> str | None:
+    cfg = load_update_config()
+    repo = cfg.get("repo") or "bidmasterge/TradingBot"
+    branch = cfg.get("branch") or "main"
+    token = cfg.get("token") or ""
+    url = f"https://raw.githubusercontent.com/{repo}/{branch}/update.json?t={int(time.time())}"
+    headers = {"User-Agent": "TradingBot-Updater", "Cache-Control": "no-cache"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            remote = json.loads(resp.read().decode("utf-8"))
+        remote_ver = str(remote.get("version") or "").strip()
+        local_ver = str(cfg.get("version") or "1.0.0").strip()
+        if remote_ver and _ver_tuple(remote_ver) > _ver_tuple(local_ver):
+            return remote_ver
+    except Exception:
+        return None
+    return None
 
 
 def pull_latest_from_github() -> int:
@@ -463,6 +490,8 @@ class TradingApp:
         self._closing = False
         self._guard_task: asyncio.Task | None = None
         self._book_task: asyncio.Task | None = None
+        self._update_check_task: asyncio.Task | None = None
+        self._update_available: str | None = None
         self._protected: dict[int, dict] = {}
         self._kept: list[dict] = []
         self._positions_by_item: dict[str, dict] = {}
@@ -502,6 +531,7 @@ class TradingApp:
         self._refresh_buttons()
         self.thread.start()
         self._book_task = asyncio.run_coroutine_threadsafe(self._depth_loop(), self.loop)
+        self._update_check_task = asyncio.run_coroutine_threadsafe(self._update_check_loop(), self.loop)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.log("Save an API, add coin pairs, choose a market, then Connect.")
 
@@ -536,6 +566,11 @@ class TradingApp:
         self.update_btn = self._btn(header, "Update", self.on_update)
         self.update_btn.pack(side="right")
         self.update_btn.bind("<ButtonPress-3>", lambda _e: self.open_update_window())
+        ver_str = load_update_config().get("version") or "1.0.0"
+        self.version_label = tk.Label(
+            header, text=f"v{ver_str}", bg=CARD, fg=MUTED_FG, font=(MONO, 10, "bold")
+        )
+        self.version_label.pack(side="right", padx=(0, 8))
         tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
 
         account = tk.Frame(shell, bg=MUTED)
@@ -1223,8 +1258,20 @@ class TradingApp:
             state="disabled" if self.busy else "normal",
             text="Disconnect" if self.connected else "Connect",
         )
-        self.update_btn.configure(state="disabled" if self.busy else "normal")
+        self.update_btn.configure(
+            state="disabled" if self.busy else "normal",
+            text=f"●  Update (v{self._update_available})" if self._update_available else "Update",
+        )
         self._paint(self.update_btn)
+        if self._update_available and not self.busy:
+            self.update_btn.configure(
+                bg="#17352c",
+                fg=BUY,
+                activebackground="#1f463a",
+                activeforeground=BUY,
+                highlightbackground=BUY,
+                highlightcolor=BUY,
+            )
         self.connect_btn._kind = "default" if self.connected else "primary"  # type: ignore[attr-defined]
         self._paint(self.connect_btn)
         locked = "disabled" if self.connected or self.busy else "readonly"
@@ -1495,6 +1542,7 @@ class TradingApp:
                 {
                     "repo": repo_var.get().strip() or "bidmasterge/TradingBot",
                     "branch": branch_var.get().strip() or "main",
+                    "version": cfg.get("version") or "1.0.0",
                     "token": token_var.get().strip(),
                 }
             )
@@ -2481,6 +2529,8 @@ class TradingApp:
         self._closing = True
         if self._book_task is not None:
             self._book_task.cancel()
+        if self._update_check_task is not None:
+            self._update_check_task.cancel()
         try:
             future = asyncio.run_coroutine_threadsafe(self._disconnect_ws(), self.loop)
             future.result(timeout=3)
@@ -2488,6 +2538,26 @@ class TradingApp:
             pass
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.root.destroy()
+
+    async def _update_check_loop(self) -> None:
+        await asyncio.sleep(2.0)
+        while not self._closing:
+            try:
+                remote_ver = await asyncio.to_thread(check_remote_version)
+                if remote_ver and remote_ver != self._update_available:
+                    self._update_available = remote_ver
+                    self.root.after(0, lambda v=remote_ver: self._flag_update(v))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(30.0)
+
+    def _flag_update(self, remote_ver: str) -> None:
+        if self._closing:
+            return
+        self._refresh_buttons()
+        self.log(f"New update available: v{remote_ver}. Click Update to install.", "success")
 
     async def _depth_loop(self) -> None:
         ws = None
