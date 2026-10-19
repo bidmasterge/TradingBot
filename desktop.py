@@ -296,13 +296,17 @@ def fetch_rules(market: str, symbol: str) -> tuple[Decimal, Decimal]:
 
 
 class SymbolBox(ttk.Combobox):
+    ROW_H = 38
+    MAX_VISIBLE = 8
+
     def __init__(self, master, **kwargs) -> None:
         super().__init__(master, **kwargs)
         self._all: list[str] = []
         self._matches: list[str] = []
         self._active = 0
         self._popup: tk.Toplevel | None = None
-        self._list: tk.Listbox | None = None
+        self._canvas: tk.Canvas | None = None
+        self._scroll: ttk.Scrollbar | None = None
         self.bind("<KeyRelease>", self._filter)
         self.bind("<ButtonPress-1>", self._on_click)
         self.bind("<Double-Button-1>", self._on_double_click)
@@ -338,51 +342,110 @@ class SymbolBox(ttk.Combobox):
         popup = tk.Toplevel(self)
         popup.withdraw()
         popup.overrideredirect(True)
-        popup.configure(bg=BORDER)
-        listed = tk.Listbox(
-            popup,
+        popup.configure(bg=PRIMARY)
+        inner = tk.Frame(popup, bg=INPUT)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        canvas = tk.Canvas(
+            inner,
             bg=INPUT,
-            fg=FG,
-            font=(MONO, 13),
-            selectbackground="#3d3824",
-            selectforeground=FG,
-            activestyle="none",
-            relief="flat",
             highlightthickness=0,
-            exportselection=False,
-            height=8,
+            bd=0,
+            cursor="hand2",
         )
-        listed.pack(fill="both", expand=True, padx=1, pady=1)
-        listed.bind("<ButtonPress-1>", self._click_list)
+        scroll = ttk.Scrollbar(inner, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.bind("<Motion>", self._on_hover_motion)
+        canvas.bind("<ButtonPress-1>", self._click_list)
+        canvas.bind("<MouseWheel>", self._on_wheel)
         self._popup = popup
-        self._list = listed
+        self._canvas = canvas
+        self._scroll = scroll
+
+    def _draw_items(self) -> None:
+        canvas = self._canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), self.winfo_width(), 250)
+        total_h = len(self._matches) * self.ROW_H
+        canvas.configure(scrollregion=(0, 0, width, total_h))
+        current_val = self.get().strip().upper()
+        for idx, symbol in enumerate(self._matches):
+            y0 = idx * self.ROW_H
+            y1 = y0 + self.ROW_H
+            is_active = idx == self._active
+            is_current = symbol == current_val
+            row_bg = "#263d35" if is_active else ("#252932" if idx % 2 else INPUT)
+            canvas.create_rectangle(0, y0, width, y1, fill=row_bg, outline="")
+            if is_active:
+                canvas.create_rectangle(0, y0, 4, y1, fill=BUY, outline="")
+            canvas.create_line(0, y1 - 1, width, y1 - 1, fill="#30343d")
+            base, quote = _split_symbol(symbol)
+            mid_y = y0 + self.ROW_H // 2
+            base_color = "#ffffff" if is_active else (PRIMARY if is_current else FG)
+            quote_color = BUY if is_active else MUTED_FG
+            base_item = canvas.create_text(
+                14,
+                mid_y,
+                text=base,
+                anchor="w",
+                fill=base_color,
+                font=(MONO, 14, "bold"),
+            )
+            bbox = canvas.bbox(base_item)
+            qx = (bbox[2] + 2) if bbox else 80
+            canvas.create_text(
+                qx,
+                mid_y,
+                text=f"/{quote}",
+                anchor="w",
+                fill=quote_color,
+                font=(MONO, 11),
+            )
+
+    def _ensure_visible(self) -> None:
+        canvas = self._canvas
+        if canvas is None or not self._matches:
+            return
+        total = len(self._matches)
+        if total <= self.MAX_VISIBLE:
+            canvas.yview_moveto(0)
+            return
+        top_idx = int(canvas.yview()[0] * total)
+        bot_idx = top_idx + self.MAX_VISIBLE - 1
+        if self._active < top_idx:
+            canvas.yview_moveto(self._active / total)
+        elif self._active > bot_idx:
+            canvas.yview_moveto((self._active - self.MAX_VISIBLE + 1) / total)
 
     def _show(self) -> None:
         self._ensure_popup()
-        listed = self._list
+        canvas = self._canvas
         popup = self._popup
-        if listed is None or popup is None:
+        scroll = self._scroll
+        if canvas is None or popup is None or scroll is None:
             return
-        listed.delete(0, "end")
-        for symbol in self._matches:
-            listed.insert("end", symbol)
         if not self._matches:
             self._hide()
             return
         self._active = min(self._active, len(self._matches) - 1)
-        listed.selection_clear(0, "end")
-        listed.selection_set(self._active)
-        listed.activate(self._active)
-        listed.see(self._active)
         self.update_idletasks()
-        width = max(self.winfo_width(), 220)
-        row_height = 28
-        height = min(8, len(self._matches)) * row_height + 2
+        width = max(self.winfo_width(), 260)
+        visible_rows = min(self.MAX_VISIBLE, len(self._matches))
+        height = visible_rows * self.ROW_H + 2
+        if len(self._matches) > self.MAX_VISIBLE:
+            scroll.pack(side="right", fill="y")
+        else:
+            scroll.pack_forget()
         x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height()
+        y = self.winfo_rooty() + self.winfo_height() + 2
         popup.geometry(f"{width}x{height}+{x}+{y}")
         popup.deiconify()
         popup.lift()
+        popup.update_idletasks()
+        self._draw_items()
+        self._ensure_visible()
         self.focus_set()
 
     def _hide(self) -> None:
@@ -399,12 +462,23 @@ class SymbolBox(ttk.Combobox):
         if self._popup is None or not self._popup.winfo_viewable():
             self._show()
         self._active = max(0, min(len(self._matches) - 1, self._active + delta))
-        if self._list is not None:
-            self._list.selection_clear(0, "end")
-            self._list.selection_set(self._active)
-            self._list.activate(self._active)
-            self._list.see(self._active)
+        self._ensure_visible()
+        self._draw_items()
         self.focus_set()
+        return "break"
+
+    def _on_hover_motion(self, event: tk.Event) -> None:
+        if self._canvas is None or not self._matches:
+            return
+        cy = self._canvas.canvasy(event.y)
+        idx = int(cy // self.ROW_H)
+        if 0 <= idx < len(self._matches) and idx != self._active:
+            self._active = idx
+            self._draw_items()
+
+    def _on_wheel(self, event: tk.Event):
+        if self._canvas is not None and len(self._matches) > self.MAX_VISIBLE:
+            self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
         return "break"
 
     def _choose(self, symbol: str) -> None:
@@ -421,16 +495,17 @@ class SymbolBox(ttk.Combobox):
         return "break"
 
     def _click_list(self, event: tk.Event):
-        if self._list is None or not self._matches:
+        if self._canvas is None or not self._matches:
             return "break"
-        index = self._list.nearest(event.y)
+        cy = self._canvas.canvasy(event.y)
+        index = int(cy // self.ROW_H)
         if 0 <= index < len(self._matches):
             self._choose(self._matches[index])
         return "break"
 
     def _on_click(self, event: tk.Event):
         self.focus_set()
-        arrow = 18
+        arrow = 24
         if event.x >= self.winfo_width() - arrow:
             query = self.get().strip().upper()
             self._matches = self._all if not query else [symbol for symbol in self._all if symbol.startswith(query)]
@@ -446,7 +521,7 @@ class SymbolBox(ttk.Combobox):
 
     def _on_double_click(self, event: tk.Event):
         self.focus_set()
-        arrow = 18
+        arrow = 24
         if event.x < self.winfo_width() - arrow:
             self.selection_range(0, "end")
             self.icursor("end")
@@ -460,7 +535,7 @@ class SymbolBox(ttk.Combobox):
             return
         x, y = self.winfo_pointerxy()
         widget = self.winfo_containing(x, y)
-        if widget in {self, self._list, self._popup}:
+        if widget in {self, self._canvas, self._scroll, self._popup}:
             self.focus_set()
             return
         self._hide()
