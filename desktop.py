@@ -541,6 +541,181 @@ class SymbolBox(ttk.Combobox):
         self._hide()
 
 
+class DataTable(tk.Frame):
+    HEAD_H = 34
+    ROW_H = 44
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        columns: tuple[tuple[str, str, int, str], ...],
+        *,
+        on_row_click=None,
+        on_cell_click=None,
+        action_cols: set[int] | None = None,
+    ) -> None:
+        super().__init__(master, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
+        self._cols = columns
+        self._on_row_click = on_row_click
+        self._on_cell_click = on_cell_click
+        self._action_cols = action_cols or set()
+        self._rows: list[dict] = []
+        self._selected: int | None = None
+        self._hover: tuple[int | None, int | None] = (None, None)
+
+        left = tk.Frame(self, bg=INPUT)
+        left.pack(side="left", fill="both", expand=True)
+        self._head = tk.Canvas(left, bg=MUTED, height=self.HEAD_H, highlightthickness=0, bd=0)
+        self._head.pack(fill="x")
+        tk.Frame(left, bg=BORDER, height=1).pack(fill="x")
+        self._body = tk.Canvas(left, bg=INPUT, highlightthickness=0, bd=0)
+        self._body.pack(fill="both", expand=True)
+        self._scroll = ttk.Scrollbar(self, orient="vertical", command=self._body.yview)
+        self._body.configure(yscrollcommand=self._scroll.set)
+        self._scroll.pack(side="right", fill="y")
+
+        self._head.bind("<Configure>", lambda _e: self._draw())
+        self._body.bind("<Configure>", lambda _e: self._draw())
+        self._body.bind("<ButtonPress-1>", self._handle_click)
+        self._body.bind("<Motion>", self._handle_motion)
+        self._body.bind("<Leave>", self._handle_leave)
+        self._body.bind("<MouseWheel>", self._handle_wheel)
+
+    def _spans(self, total_w: int) -> list[tuple[int, int]]:
+        total_w = max(total_w, 300)
+        weights = sum(col[2] for col in self._cols) or 1
+        spans: list[tuple[int, int]] = []
+        x = 0
+        for idx, (_cid, _title, weight, _align) in enumerate(self._cols):
+            if idx == len(self._cols) - 1:
+                x1 = total_w
+            else:
+                x1 = x + int(total_w * weight / weights)
+            spans.append((x, x1))
+            x = x1
+        return spans
+
+    def set_rows(self, rows: list[dict]) -> None:
+        self._rows = list(rows)
+        if self._selected is not None and self._selected >= len(self._rows):
+            self._selected = None
+        self._draw()
+
+    def _draw(self) -> None:
+        w = max(self._body.winfo_width(), self._head.winfo_width(), 300)
+        spans = self._spans(w)
+        self._head.delete("all")
+        self._head.create_rectangle(0, 0, w, self.HEAD_H, fill=MUTED, outline="")
+        mid_h = self.HEAD_H // 2
+        for idx, (_cid, title, _weight, align) in enumerate(self._cols):
+            x0, x1 = spans[idx]
+            tx = (x0 + 12) if align == "w" else ((x1 - 12) if align == "e" else (x0 + x1) // 2)
+            self._head.create_text(tx, mid_h, text=title, anchor=align, fill=MUTED_FG, font=(SANS, 10, "bold"))
+
+        self._body.delete("all")
+        total_h = max(len(self._rows) * self.ROW_H, 1)
+        self._body.configure(scrollregion=(0, 0, w, total_h))
+        h_row, h_col = self._hover
+        for r_idx, row in enumerate(self._rows):
+            y0 = r_idx * self.ROW_H
+            y1 = y0 + self.ROW_H
+            is_sel = r_idx == self._selected
+            is_hov = r_idx == h_row
+            bg = "#353122" if is_sel else ("#262a33" if is_hov else ("#21242b" if r_idx % 2 else INPUT))
+            self._body.create_rectangle(0, y0, w, y1, fill=bg, outline="")
+            self._body.create_line(0, y1 - 1, w, y1 - 1, fill="#2e323a")
+            values = row.get("values") or ()
+            colors: dict[int, str] = row.get("colors") or {}
+            buttons: dict[int, str] = row.get("buttons") or {}
+            mid_y = y0 + self.ROW_H // 2
+            for c_idx, (_cid, _title, _weight, align) in enumerate(self._cols):
+                if c_idx >= len(values):
+                    continue
+                x0, x1 = spans[c_idx]
+                text = str(values[c_idx])
+                if c_idx in buttons:
+                    kind = buttons[c_idx]
+                    btn_Hover = is_hov and h_col == c_idx
+                    if kind == "danger":
+                        b_bg = "#522a2d" if btn_Hover else "#3a2426"
+                        b_fg = SELL
+                        b_bd = "#a14e48"
+                    else:
+                        b_bg = "#3e434d" if btn_Hover else SECONDARY
+                        b_fg = FG
+                        b_bd = BORDER
+                    pad_x = 8
+                    pad_y = 7
+                    self._body.create_rectangle(
+                        x0 + pad_x,
+                        y0 + pad_y,
+                        x1 - pad_x,
+                        y1 - pad_y,
+                        fill=b_bg,
+                        outline=b_bd,
+                    )
+                    self._body.create_text(
+                        (x0 + x1) // 2,
+                        mid_y,
+                        text=text,
+                        anchor="center",
+                        fill=b_fg,
+                        font=(SANS, 12, "bold"),
+                    )
+                else:
+                    fg = colors.get(c_idx, FG)
+                    tx = (x0 + 12) if align == "w" else ((x1 - 12) if align == "e" else (x0 + x1) // 2)
+                    self._body.create_text(tx, mid_y, text=text, anchor=align, fill=fg, font=(MONO, 14, "bold"))
+
+    def _hit(self, event: tk.Event) -> tuple[int | None, int | None]:
+        if not self._rows:
+            return None, None
+        cy = self._body.canvasy(event.y)
+        r_idx = int(cy // self.ROW_H)
+        if r_idx < 0 or r_idx >= len(self._rows):
+            return None, None
+        w = max(self._body.winfo_width(), 300)
+        spans = self._spans(w)
+        c_idx = None
+        for idx, (x0, x1) in enumerate(spans):
+            if x0 <= event.x <= x1:
+                c_idx = idx
+                break
+        return r_idx, c_idx
+
+    def _handle_motion(self, event: tk.Event) -> None:
+        r_idx, c_idx = self._hit(event)
+        new_hover = (r_idx, c_idx)
+        if new_hover != self._hover:
+            self._hover = new_hover
+            self._draw()
+        self._body.configure(cursor="hand2" if r_idx is not None and (c_idx in self._action_cols or self._on_row_click) else "")
+
+    def _handle_leave(self, _event: tk.Event) -> None:
+        if self._hover != (None, None):
+            self._hover = (None, None)
+            self._draw()
+        self._body.configure(cursor="")
+
+    def _handle_click(self, event: tk.Event) -> None:
+        r_idx, c_idx = self._hit(event)
+        if r_idx is None:
+            return
+        row = self._rows[r_idx]
+        if c_idx in self._action_cols and self._on_cell_click is not None:
+            self._on_cell_click(r_idx, c_idx, row)
+            return
+        self._selected = r_idx
+        self._draw()
+        if self._on_row_click is not None:
+            self._on_row_click(r_idx, row)
+
+    def _handle_wheel(self, event: tk.Event):
+        if len(self._rows) * self.ROW_H > self._body.winfo_height():
+            self._body.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+
 class TradingApp:
     def __init__(self) -> None:
         enable_dpi()
@@ -885,33 +1060,25 @@ class TradingApp:
         self.order_count_badge.pack(side="left", padx=(8, 0))
         self.refresh_btn = self._btn(orders_head, "Refresh", self.on_refresh, "ghost")
         self.refresh_btn.pack(side="right")
-        table = tk.Frame(orders_pane, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
-        table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
-        columns = ("id", "symbol", "side", "position", "price", "qty", "status", "action")
-        self.tree = ttk.Treeview(table, columns=columns, show="headings", height=5)
-        for col, title, width, anchor in (
-            ("id", "ORDER ID", 150, "w"),
-            ("symbol", "SYMBOL", 115, "w"),
-            ("side", "SIDE", 75, "w"),
-            ("position", "POSITION", 95, "w"),
-            ("price", "PRICE", 115, "e"),
-            ("qty", "QUANTITY", 115, "e"),
-            ("status", "STATUS", 95, "w"),
-            ("action", "CANCEL", 110, "center"),
-        ):
-            self.tree.heading(col, text=title)
-            self.tree.column(col, width=width, anchor=anchor)
-        self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<<TreeviewSelect>>", self.on_select_order)
-        self.tree.bind("<ButtonPress-1>", self.on_click_order)
-        self.tree.bind("<Motion>", self.on_hover_order)
-        self.tree.tag_configure("buy", foreground=BUY)
-        self.tree.tag_configure("sell", foreground=SELL)
-        scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.empty_orders = tk.Label(table, text="Connect to load open orders", bg=INPUT, fg=MUTED_FG, font=(SANS, 13))
-        self.empty_orders.place(relx=0.5, rely=0.55, anchor="center")
+        self.tree = DataTable(
+            orders_pane,
+            (
+                ("id", "ORDER ID", 150, "w"),
+                ("symbol", "SYMBOL", 115, "w"),
+                ("side", "SIDE", 75, "w"),
+                ("position", "POSITION", 95, "w"),
+                ("price", "PRICE", 115, "e"),
+                ("qty", "QUANTITY", 115, "e"),
+                ("status", "STATUS", 95, "w"),
+                ("action", "CANCEL", 110, "center"),
+            ),
+            on_row_click=self._on_order_row_select,
+            on_cell_click=self._on_order_cell_action,
+            action_cols={7},
+        )
+        self.tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.empty_orders = tk.Label(self.tree, text="Connect to load open orders", bg=INPUT, fg=MUTED_FG, font=(SANS, 13))
+        self.empty_orders.place(relx=0.5, rely=0.58, anchor="center")
         self.empty_orders.lift()
 
         tk.Frame(right, bg=BORDER, height=1).pack(fill="x")
@@ -924,34 +1091,26 @@ class TradingApp:
         self.pos_count_badge.pack(side="left", padx=(8, 0))
         self.pos_refresh_btn = self._btn(pos_head, "Refresh", self.on_refresh, "ghost")
         self.pos_refresh_btn.pack(side="right")
-        pos_table = tk.Frame(pos_pane, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
-        pos_table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
-        pos_cols = ("symbol", "side", "size", "entry", "mark", "pnl", "limit_close", "market_close")
-        self.pos_tree = ttk.Treeview(pos_table, columns=pos_cols, show="headings", height=4)
-        for col, title, width, anchor in (
-            ("symbol", "SYMBOL", 115, "w"),
-            ("side", "SIDE", 85, "w"),
-            ("size", "SIZE (USDT)", 130, "e"),
-            ("entry", "ENTRY", 115, "e"),
-            ("mark", "MARK", 115, "e"),
-            ("pnl", "PNL (USDT)", 125, "e"),
-            ("limit_close", "LIMIT", 100, "center"),
-            ("market_close", "MARKET", 105, "center"),
-        ):
-            self.pos_tree.heading(col, text=title)
-            self.pos_tree.column(col, width=width, anchor=anchor)
-        self.pos_tree.pack(side="left", fill="both", expand=True)
-        self.pos_tree.bind("<ButtonPress-1>", self.on_click_position)
-        self.pos_tree.bind("<Motion>", self.on_hover_position)
-        self.pos_tree.tag_configure("buy", foreground=BUY)
-        self.pos_tree.tag_configure("sell", foreground=SELL)
-        pos_scroll = ttk.Scrollbar(pos_table, orient="vertical", command=self.pos_tree.yview)
-        self.pos_tree.configure(yscrollcommand=pos_scroll.set)
-        pos_scroll.pack(side="right", fill="y")
-        self.empty_positions = tk.Label(
-            pos_table, text="Connect to load open positions", bg=INPUT, fg=MUTED_FG, font=(SANS, 13)
+        self.pos_tree = DataTable(
+            pos_pane,
+            (
+                ("symbol", "SYMBOL", 115, "w"),
+                ("side", "SIDE", 85, "w"),
+                ("size", "SIZE (USDT)", 130, "e"),
+                ("entry", "ENTRY", 115, "e"),
+                ("mark", "MARK", 115, "e"),
+                ("pnl", "PNL (USDT)", 125, "e"),
+                ("limit_close", "LIMIT", 100, "center"),
+                ("market_close", "MARKET", 105, "center"),
+            ),
+            on_cell_click=self._on_position_cell_action,
+            action_cols={6, 7},
         )
-        self.empty_positions.place(relx=0.5, rely=0.55, anchor="center")
+        self.pos_tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.empty_positions = tk.Label(
+            self.pos_tree, text="Connect to load open positions", bg=INPUT, fg=MUTED_FG, font=(SANS, 13)
+        )
+        self.empty_positions.place(relx=0.5, rely=0.58, anchor="center")
         self.empty_positions.lift()
 
         tk.Frame(right, bg=BORDER, height=1).pack(fill="x")
@@ -1812,11 +1971,8 @@ class TradingApp:
         self.root.after(0, self._request_balance)
         self._refresh_buttons()
 
-    def on_select_order(self, _event: object) -> None:
-        selected = self.tree.selection()
-        if not selected:
-            return
-        values = self.tree.item(selected[0], "values")
+    def _on_order_row_select(self, _r_idx: int, row: dict) -> None:
+        values = row.get("values") or ()
         if not values:
             return
         self.order_id.set(str(values[0]))
@@ -1825,31 +1981,23 @@ class TradingApp:
             if DECIMAL.fullmatch(px_val) and Decimal(px_val) > 0:
                 self.price.set(dec_str(Decimal(px_val)))
 
-    def on_hover_order(self, event: tk.Event) -> None:
-        item = self.tree.identify_row(event.y)
-        col = self.tree.identify_column(event.x)
-        self.tree.configure(cursor="hand2" if item and col == "#8" else "")
-
-    def on_click_order(self, event: tk.Event) -> str | None:
-        item = self.tree.identify_row(event.y)
-        col = self.tree.identify_column(event.x)
-        if not item or col != "#8":
-            return None
-        values = self.tree.item(item, "values")
+    def _on_order_cell_action(self, _r_idx: int, c_idx: int, row: dict) -> None:
+        if c_idx != 7:
+            return
+        values = row.get("values") or ()
         if not values:
-            return "break"
+            return
         raw_id = str(values[0]).strip()
         row_symbol = str(values[1]).strip() or self._symbol()
         if raw_id.isdigit() and row_symbol and self.connected and not self.busy:
             self.order_id.set(raw_id)
             self.spawn(self._cancel(row_symbol, int(raw_id)), self._on_canceled)
-        return "break"
 
     def _show_positions(self, rows: object) -> None:
-        self.pos_tree.delete(*self.pos_tree.get_children())
         self._positions_by_item.clear()
         if not isinstance(rows, list):
             rows = []
+        table_rows: list[dict] = []
         for row in rows:
             amt = Decimal(str(row.get("positionAmt") or "0"))
             if amt == 0:
@@ -1863,29 +2011,32 @@ class TradingApp:
             notional_raw = Decimal(str(row.get("notional") or "0"))
             size_usdt = abs(notional_raw) if notional_raw != 0 else size_abs * (mark_px if mark_px > 0 else entry_px)
             pnl = Decimal(str(row.get("unRealizedProfit") or row.get("unrealizedProfit") or "0"))
-            item_id = self.pos_tree.insert(
-                "",
-                "end",
-                values=(
-                    row.get("symbol", ""),
-                    side_label,
-                    f"{size_usdt:,.2f}",
-                    dec_str(entry_px),
-                    dec_str(mark_px),
-                    f"{pnl:+,.2f}",
-                    "Limit",
-                    "Market",
-                ),
-                tags=("buy" if pnl >= 0 else "sell",),
-            )
-            self._positions_by_item[item_id] = {
+            info = {
                 "symbol": str(row.get("symbol") or ""),
                 "amt": amt,
                 "qty": size_abs,
                 "positionSide": pos_side,
                 "markPrice": mark_px,
             }
-        count = len(self._positions_by_item)
+            table_rows.append(
+                {
+                    "values": (
+                        row.get("symbol", ""),
+                        side_label,
+                        f"{size_usdt:,.2f}",
+                        dec_str(entry_px),
+                        dec_str(mark_px),
+                        f"{pnl:+,.2f}",
+                        "Limit",
+                        "Market",
+                    ),
+                    "colors": {5: BUY if pnl >= 0 else SELL},
+                    "buttons": {6: "default", 7: "danger"},
+                    "meta": info,
+                }
+            )
+        self.pos_tree.set_rows(table_rows)
+        count = len(table_rows)
         self.pos_count_badge.configure(text=str(count))
         if count:
             self.empty_positions.place_forget()
@@ -1897,25 +2048,17 @@ class TradingApp:
             else:
                 msg = "No open positions"
             self.empty_positions.configure(text=msg)
-            self.empty_positions.place(relx=0.5, rely=0.55, anchor="center")
+            self.empty_positions.place(relx=0.5, rely=0.58, anchor="center")
             self.empty_positions.lift()
 
-    def on_hover_position(self, event: tk.Event) -> None:
-        item = self.pos_tree.identify_row(event.y)
-        col = self.pos_tree.identify_column(event.x)
-        self.pos_tree.configure(cursor="hand2" if item and col in {"#7", "#8"} else "")
-
-    def on_click_position(self, event: tk.Event) -> str | None:
-        item = self.pos_tree.identify_row(event.y)
-        col = self.pos_tree.identify_column(event.x)
-        if not item or col not in {"#7", "#8"}:
-            return None
-        info = self._positions_by_item.get(item)
+    def _on_position_cell_action(self, _r_idx: int, c_idx: int, row: dict) -> None:
+        if c_idx not in {6, 7}:
+            return
+        info = row.get("meta")
         if not info or not self.connected or self.busy:
-            return "break"
-        mode = "LIMIT" if col == "#7" else "MARKET"
+            return
+        mode = "LIMIT" if c_idx == 6 else "MARKET"
         self.spawn(self._close_position(info, mode), self._on_position_closed)
-        return "break"
 
     async def _close_position(self, info: dict, mode: str) -> tuple:
         symbol = info["symbol"]
@@ -2366,31 +2509,33 @@ class TradingApp:
         self._refresh_buttons()
 
     def _render_order_rows(self, rows: list) -> None:
-        self.tree.delete(*self.tree.get_children())
+        table_rows: list[dict] = []
         for row in rows:
             side = str(row.get("side", ""))
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    row.get("orderId", ""),
-                    row.get("symbol", ""),
-                    side,
-                    row.get("positionSide") or "—",
-                    row.get("price", ""),
-                    row.get("origQty", ""),
-                    row.get("status", ""),
-                    "✕ Cancel",
-                ),
-                tags=("buy" if side == "BUY" else "sell",),
+            table_rows.append(
+                {
+                    "values": (
+                        row.get("orderId", ""),
+                        row.get("symbol", ""),
+                        side,
+                        row.get("positionSide") or "—",
+                        row.get("price", ""),
+                        row.get("origQty", ""),
+                        row.get("status", ""),
+                        "✕ Cancel",
+                    ),
+                    "colors": {2: BUY if side == "BUY" else SELL},
+                    "buttons": {7: "danger"},
+                }
             )
-        count = len(rows)
+        self.tree.set_rows(table_rows)
+        count = len(table_rows)
         self.order_count_badge.configure(text=str(count))
         if count:
             self.empty_orders.place_forget()
         else:
             self.empty_orders.configure(text="No open orders" if self.connected else "Connect to load open orders")
-            self.empty_orders.place(relx=0.5, rely=0.55, anchor="center")
+            self.empty_orders.place(relx=0.5, rely=0.58, anchor="center")
             self.empty_orders.lift()
 
     async def _account_sync_loop(self) -> None:
