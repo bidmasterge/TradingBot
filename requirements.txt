@@ -1,0 +1,4 @@
+websockets>=13,<16
+orjson>=3.10
+python-dotenv>=1.0
+cryptography>=42

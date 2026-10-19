@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+profiles.json
+.venv/
+runtime/
+Design/
+__pycache__/
+*.pem
+*.pyc
+*.tmp
