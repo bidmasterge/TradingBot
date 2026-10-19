@@ -1876,7 +1876,7 @@ class TradingApp:
                     "Limit",
                     "Market",
                 ),
-                tags=("buy" if is_long else "sell",),
+                tags=("buy" if pnl >= 0 else "sell",),
             )
             self._positions_by_item[item_id] = {
                 "symbol": str(row.get("symbol") or ""),
