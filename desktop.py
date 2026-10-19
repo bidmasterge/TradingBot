@@ -577,9 +577,11 @@ class TradingApp:
         self.api_name = tk.StringVar(value=names[0] if names else "")
         self.market = tk.StringVar(value="Futures")
         self.position_side = tk.StringVar(value="BOTH")
-        self.leverage = tk.StringVar(value="10")
+        self.leverage = tk.StringVar(value="20")
         symbols = self.config["symbols"]
-        self.symbol = tk.StringVar(value=symbols[0] if symbols else "")
+        saved_sym = str(self.config.get("last_symbol") or "").strip().upper()
+        initial_sym = saved_sym if saved_sym in symbols else (symbols[0] if symbols else "")
+        self.symbol = tk.StringVar(value=initial_sym)
         self.side = tk.StringVar(value="BUY")
         self.usdt = tk.StringVar(value="100")
         self.price = tk.StringVar(value="0.40")
@@ -772,25 +774,6 @@ class TradingApp:
         self.usdt_entry.pack(fill="x", pady=(3, 0), ipady=4)
         tk.Label(price_col, text="Price", bg=CARD, fg=MUTED_FG, font=(SANS, 13)).pack(anchor="w")
         self._entry(price_col, self.price, big=True).pack(fill="x", pady=(3, 0), ipady=4)
-        quote = tk.Frame(size, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
-        quote.pack(fill="x", pady=(10, 0))
-        self.price_btn = self._btn(quote, "Get price", self.on_price, "ghost", big=True)
-        self.price_btn.pack(side="right", padx=8, pady=8)
-        qty_text = tk.Frame(quote, bg=INPUT)
-        qty_text.pack(side="right", padx=10)
-        tk.Label(qty_text, text="Qty", bg=INPUT, fg=MUTED_FG, font=(SANS, 11)).pack(anchor="e")
-        qty_line = tk.Frame(qty_text, bg=INPUT)
-        qty_line.pack(anchor="e")
-        tk.Label(qty_line, textvariable=self.qty_text, bg=INPUT, fg=FG, font=(MONO, 13, "bold")).pack(side="left")
-        tk.Label(qty_line, textvariable=self.base_text, bg=INPUT, fg=MUTED_FG, font=(SANS, 11)).pack(side="left")
-        quote_text = tk.Frame(quote, bg=INPUT)
-        quote_text.pack(side="left", fill="x", expand=True, padx=10, pady=8)
-        last_line = tk.Frame(quote_text, bg=INPUT)
-        last_line.pack(anchor="w")
-        tk.Label(last_line, text="Last price", bg=INPUT, fg=MUTED_FG, font=(SANS, 11)).pack(side="left")
-        self.distance_label = tk.Label(last_line, textvariable=self.distance_text, bg=INPUT, fg=MUTED_FG, font=(MONO, 11, "bold"))
-        self.distance_label.pack(side="left", padx=(6, 0))
-        tk.Label(quote_text, textvariable=self.last_price, bg=INPUT, fg=FG, font=(MONO, 14, "bold")).pack(anchor="w")
 
         execution = self._section(left, "Execution")
         timing = tk.Frame(execution, bg=CARD)
@@ -1221,6 +1204,12 @@ class TradingApp:
             highlightcolor=SELL if over_max else PRIMARY,
         )
         symbol = self._symbol()
+        if symbol in self.config.get("symbols", []) and self.config.get("last_symbol") != symbol:
+            self.config["last_symbol"] = symbol
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
         base, _quote = _split_symbol(symbol) if symbol else ("", "")
         self.base_text.set(f" {base}" if base else "")
         try:
@@ -1239,12 +1228,6 @@ class TradingApp:
         else:
             qty = Decimal(0)
         self.qty_text.set(dec_str(qty))
-        if self._last_px and self._last_px > 0 and price > 0:
-            distance = (price - self._last_px) / self._last_px * 100
-            self.distance_text.set(f"{distance:+.2f}%")
-            self.distance_label.configure(fg=BUY if distance <= 0 else SELL)
-        else:
-            self.distance_text.set("")
 
     def _clear_log(self) -> None:
         self.output.configure(state="normal")
@@ -1298,7 +1281,7 @@ class TradingApp:
 
     def _refresh_buttons(self) -> None:
         trade = "normal" if self.connected and not self.busy else "disabled"
-        for button in (self.place_btn, self.cancel_all_btn, self.refresh_btn, self.pos_refresh_btn, self.price_btn):
+        for button in (self.place_btn, self.cancel_all_btn, self.refresh_btn, self.pos_refresh_btn):
             button.configure(state=trade)
         move_state = "normal" if self.connected and not self.busy and not self._multi_running else "disabled"
         self.move_up_btn.configure(state=move_state)
@@ -1325,7 +1308,6 @@ class TradingApp:
             self.cancel_all_btn,
             self.refresh_btn,
             self.pos_refresh_btn,
-            self.price_btn,
             self.connect_btn,
         ):
             self._paint(button)
@@ -2602,6 +2584,13 @@ class TradingApp:
 
     def on_close(self) -> None:
         self._closing = True
+        symbol = self._symbol()
+        if symbol in self.config.get("symbols", []):
+            self.config["last_symbol"] = symbol
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
         if self._book_task is not None:
             self._book_task.cancel()
         if self._update_check_task is not None:
