@@ -611,6 +611,8 @@ class TradingApp:
         self._update_check_task = asyncio.run_coroutine_threadsafe(self._update_check_loop(), self.loop)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.log("Save an API, add coin pairs, choose a market, then Connect.")
+        if "--smoke" not in sys.argv and self._selected_api() is not None:
+            self.root.after(150, self.on_connect_toggle)
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
@@ -1651,9 +1653,7 @@ class TradingApp:
         if info["market"] == "futures":
             self.log("This API key must have Futures enabled. Use BOTH unless the account is in hedge mode.")
         self._refresh_buttons()
-        symbol = self._symbol()
-        if symbol:
-            self.spawn(self._open(symbol), self._show_orders)
+        self.spawn(self._open(), self._show_orders)
 
     def _on_disconnected(self, _value: object) -> None:
         self.connected = False
@@ -1726,7 +1726,7 @@ class TradingApp:
             f"local {ms(local_ns)}  network {ms(net_ns)}"
         )
         self._refresh_buttons()
-        self.spawn(self._open(self._symbol()), self._show_orders)
+        self.spawn(self._open(), self._show_orders)
 
     def on_multi(self) -> None:
         if self._multi_running:
@@ -1780,7 +1780,7 @@ class TradingApp:
             f"local {ms(local_ns)}  network {ms(net_ns)}"
         )
         self._refresh_buttons()
-        self.spawn(self._open(self._symbol()), self._show_orders)
+        self.spawn(self._open(), self._show_orders)
 
     def on_cancel_all(self) -> None:
         symbol = self._symbol()
@@ -1795,14 +1795,10 @@ class TradingApp:
         else:
             self.log("Canceled all open orders.")
         self._refresh_buttons()
-        self.spawn(self._open(self._symbol()), self._show_orders)
+        self.spawn(self._open(), self._show_orders)
 
     def on_refresh(self) -> None:
-        symbol = self._symbol()
-        if not symbol:
-            self.log("Choose a symbol.")
-            return
-        self.spawn(self._open(symbol), self._show_orders)
+        self.spawn(self._open(), self._show_orders)
 
     def _show_orders(self, rows: object, announce: bool = True) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -1995,7 +1991,7 @@ class TradingApp:
                 "success",
             )
         self._refresh_buttons()
-        self.spawn(self._open(self._symbol()), self._show_orders)
+        self.spawn(self._open(), self._show_orders)
 
     async def _connect_ws(self, api_key: str, secret: str, market: str) -> dict:
         await self._disconnect_ws()
@@ -2164,7 +2160,7 @@ class TradingApp:
                 ),
             )
         try:
-            fresh = await self._open(symbol)
+            fresh = await self._open()
         except Exception:
             fresh = []
         return {
@@ -2308,7 +2304,7 @@ class TradingApp:
                 )
                 index += 1
                 try:
-                    rows = await self._open(spec["symbol"])
+                    rows = await self._open()
                     positions = await self._need_client().open_positions() if spec["market"] == "futures" else []
                 except Exception:
                     rows = None
@@ -2541,9 +2537,9 @@ class TradingApp:
         )
         await self._refresh_open(order["symbol"])
 
-    async def _refresh_open(self, symbol: str) -> None:
+    async def _refresh_open(self, symbol: str = "") -> None:
         try:
-            rows = await self._open(symbol)
+            rows = await self._open()
             positions = await self._need_client().open_positions() if self.market.get() == "Futures" else []
         except Exception:
             return
@@ -2552,7 +2548,7 @@ class TradingApp:
     async def _price(self, symbol: str) -> str:
         return await self._need_client().last_price(symbol)
 
-    async def _open(self, symbol: str) -> list:
+    async def _open(self, symbol: str | None = None) -> list:
         return await self._need_client().open_orders(symbol)
 
     async def _cancel_all(self, symbol: str) -> list:

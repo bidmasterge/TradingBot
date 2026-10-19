@@ -313,16 +313,17 @@ class OrderClient:
             return []
         return await self.call("openOrders.cancelAll", {"symbol": symbol}, signed=True)
 
-    async def open_orders(self, symbol: str) -> list:
+    async def open_orders(self, symbol: str | None = None) -> list:
+        params: dict[str, Any] = {"symbol": symbol} if symbol else {}
         if self.market == "futures":
             result = await asyncio.to_thread(
                 self._futures_rest_sync,
                 "GET",
                 "/fapi/v1/openOrders",
-                {"symbol": symbol},
+                params,
             )
             return result if isinstance(result, list) else []
-        return await self.call("openOrders.status", {"symbol": symbol}, signed=True)
+        return await self.call("openOrders.status", params, signed=True)
 
     async def open_positions(self) -> list:
         if self.market != "futures":
