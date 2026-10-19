@@ -500,7 +500,7 @@ class TradingApp:
 
         names = [item["name"] for item in self.config["apis"]]
         self.api_name = tk.StringVar(value=names[0] if names else "")
-        self.market = tk.StringVar(value="Spot")
+        self.market = tk.StringVar(value="Futures")
         self.position_side = tk.StringVar(value="BOTH")
         self.leverage = tk.StringVar(value="10")
         symbols = self.config["symbols"]
