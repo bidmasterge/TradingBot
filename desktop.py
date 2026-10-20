@@ -1045,11 +1045,9 @@ class TradingApp:
         cancel = self._section(left, "Cancel", rule=False)
         cancel_row = tk.Frame(cancel, bg=CARD)
         cancel_row.pack(fill="x")
-        self._entry(cancel_row, self.order_id, width=12, big=True).pack(side="left", fill="x", expand=True, ipady=4)
-        self.cancel_btn = self._btn(cancel_row, "Cancel", self.on_cancel, big=True)
-        self.cancel_btn.pack(side="left", padx=6)
         self.cancel_all_btn = self._btn(cancel_row, "Cancel all", self.on_cancel_all, "danger", big=True)
-        self.cancel_all_btn.pack(side="left")
+        self.cancel_all_btn.configure(font=(SANS, 15, "bold"), pady=8)
+        self.cancel_all_btn.pack(fill="x", expand=True)
 
         orders_pane = tk.Frame(right, bg=CARD)
         orders_pane.pack(fill="both", expand=True)
@@ -1447,8 +1445,6 @@ class TradingApp:
         move_state = "normal" if self.connected and not self.busy and not self._multi_running else "disabled"
         self.move_up_btn.configure(state=move_state)
         self.move_down_btn.configure(state=move_state)
-        cancel_state = trade if self.order_id.get().strip() else "disabled"
-        self.cancel_btn.configure(state=cancel_state)
         if self._multi_running and self.connected and not self.busy:
             self.multi_btn.configure(state="normal", text="Stop")
             self.multi_btn._kind = "danger"  # type: ignore[attr-defined]
@@ -1465,7 +1461,6 @@ class TradingApp:
             self.multi_btn,
             self.move_up_btn,
             self.move_down_btn,
-            self.cancel_btn,
             self.cancel_all_btn,
             self.refresh_btn,
             self.pos_refresh_btn,
