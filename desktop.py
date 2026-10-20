@@ -175,6 +175,8 @@ def load_config() -> dict:
             save_config(data)
     data.setdefault("apis", [])
     data.setdefault("symbols", [])
+    if not isinstance(data.get("symbol_counts"), dict):
+        data["symbol_counts"] = {}
     return data
 
 
@@ -747,6 +749,7 @@ class TradingApp:
         self._kept: list[dict] = []
         self._positions_by_item: dict[str, dict] = {}
         self._brackets: dict[str, list[dict]] = {}
+        self._top_coin_btns: list[tk.Button] = []
         self._rules: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
         self.config = load_config()
 
@@ -859,6 +862,8 @@ class TradingApp:
         balance_line.pack(anchor="e")
         tk.Label(balance_line, textvariable=self.balance_text, bg=MUTED, fg=FG, font=(MONO, 11)).pack(side="left")
         tk.Label(balance_line, text=" USDT", bg=MUTED, fg=MUTED_FG, font=(SANS, 10)).pack(side="left")
+        self.top_coins_bar = tk.Frame(account_row, bg=MUTED)
+        self.top_coins_bar.pack(side="left", padx=(16, 12))
         tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
 
         body = tk.Frame(shell, bg=BG)
@@ -1395,6 +1400,7 @@ class TradingApp:
         )
         base, _quote = _split_symbol(symbol) if symbol else ("", "")
         self.base_text.set(f" {base}" if base else "")
+        self._render_top_coins()
         try:
             usdt = Decimal(self.usdt.get().strip())
             price = Decimal(self.price.get().strip())
@@ -1446,6 +1452,76 @@ class TradingApp:
         self.symbol_box.set_symbols(self.config["symbols"])
         if self.config["symbols"] and self.symbol.get().strip().upper() not in self.config["symbols"]:
             self.symbol.set(self.config["symbols"][0])
+        self._render_top_coins()
+
+    def _top_symbols(self) -> list[str]:
+        counts = self.config.get("symbol_counts")
+        if not isinstance(counts, dict):
+            counts = {}
+        saved = list(self.config.get("symbols") or [])
+        pool: list[str] = list(saved)
+        for sym in counts:
+            if sym not in pool and SYMBOL.fullmatch(str(sym)):
+                pool.append(str(sym))
+        order_index = {sym: idx for idx, sym in enumerate(pool)}
+        ranked = sorted(
+            pool,
+            key=lambda s: (-int(counts.get(s, 0) or 0), order_index.get(s, 9999)),
+        )
+        return ranked[:10]
+
+    def _bump_symbol_usage(self, symbol: str) -> None:
+        sym = symbol.strip().upper()
+        if not sym:
+            return
+        counts = self.config.setdefault("symbol_counts", {})
+        if not isinstance(counts, dict):
+            counts = {}
+            self.config["symbol_counts"] = counts
+        counts[sym] = int(counts.get(sym, 0) or 0) + 1
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+        self._render_top_coins()
+
+    def _render_top_coins(self) -> None:
+        if not hasattr(self, "top_coins_bar"):
+            return
+        top = self._top_symbols()
+        while len(self._top_coin_btns) < len(top):
+            idx = len(self._top_coin_btns)
+            btn = tk.Button(
+                self.top_coins_bar,
+                relief="flat",
+                bd=0,
+                padx=10,
+                pady=3,
+                font=(MONO, 13, "bold"),
+                cursor="hand2",
+                highlightthickness=1,
+            )
+            btn.pack(side="left", padx=(0 if idx == 0 else 6, 0))
+            self._top_coin_btns.append(btn)
+        while len(self._top_coin_btns) > len(top):
+            self._top_coin_btns.pop().destroy()
+        active_sym = self._symbol()
+        for btn, sym in zip(self._top_coin_btns, top):
+            base, _quote = _split_symbol(sym)
+            is_active = sym == active_sym
+            bg = "#3d3522" if is_active else SECONDARY
+            fg = PRIMARY if is_active else FG
+            edge = PRIMARY if is_active else BORDER
+            btn.configure(
+                text=base,
+                command=lambda s=sym: self.symbol.set(s),
+                bg=bg,
+                fg=fg,
+                activebackground="#4a4028" if is_active else "#3c4048",
+                activeforeground=fg,
+                highlightbackground=edge,
+                highlightcolor=edge,
+            )
 
     def log(self, text: str, level: str = "info") -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -2227,6 +2303,8 @@ class TradingApp:
         if spec["position"]:
             params["positionSide"] = spec["position"]
         result, local_ns, net_ns = await self._timed("order.place", params)
+        sym = spec["symbol"]
+        self.root.after(0, lambda s=sym: self._bump_symbol_usage(s))
         return {
             "result": result,
             "local_ns": local_ns,
