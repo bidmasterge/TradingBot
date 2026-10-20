@@ -345,6 +345,24 @@ class OrderClient:
                 continue
         return active
 
+    async def leverage_brackets(self) -> dict[str, list[dict]]:
+        if self.market != "futures":
+            return {}
+        result = await asyncio.to_thread(
+            self._futures_rest_sync,
+            "GET",
+            "/fapi/v1/leverageBracket",
+            {},
+        )
+        out: dict[str, list[dict]] = {}
+        if isinstance(result, list):
+            for item in result:
+                sym = str(item.get("symbol") or "")
+                brackets = item.get("brackets")
+                if sym and isinstance(brackets, list):
+                    out[sym] = brackets
+        return out
+
     async def test_order(self, params: dict[str, Any]) -> dict:
         return await self.call("order.test", params, signed=True)
 

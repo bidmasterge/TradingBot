@@ -746,6 +746,7 @@ class TradingApp:
         self._protected: dict[int, dict] = {}
         self._kept: list[dict] = []
         self._positions_by_item: dict[str, dict] = {}
+        self._brackets: dict[str, list[dict]] = {}
         self._rules: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
         self.config = load_config()
 
@@ -900,14 +901,15 @@ class TradingApp:
         tk.Label(self.leverage_row, text="Leverage", bg=CARD, fg=MUTED_FG, font=(SANS, 13), width=8, anchor="w").pack(
             side="left", pady=(8, 0)
         )
-        ttk.Combobox(
+        self.leverage_box = ttk.Combobox(
             self.leverage_row,
             textvariable=self.leverage,
             values=tuple(str(n) for n in range(1, 126)),
             width=5,
             state="readonly",
             font=(SANS, 13),
-        ).pack(side="left", pady=(8, 0), ipady=2)
+        )
+        self.leverage_box.pack(side="left", pady=(8, 0), ipady=2)
         tk.Label(self.leverage_row, text="x", bg=CARD, fg=MUTED_FG, font=(SANS, 13, "bold")).pack(
             side="left", padx=(6, 0), pady=(8, 0)
         )
@@ -1337,14 +1339,43 @@ class TradingApp:
         )
 
     def _sync_quote(self, *_args: object) -> None:
-        max_pos: Decimal | None = None
-        if self._balance_val is not None:
+        symbol = self._symbol()
+        if symbol in self.config.get("symbols", []) and self.config.get("last_symbol") != symbol:
+            self.config["last_symbol"] = symbol
             try:
-                lev = Decimal(self.leverage.get().strip())
-                max_pos = self._balance_val * lev
-                self.max_pos_text.set(f"Max: {max_pos:,.0f} USDT")
+                save_config(self.config)
             except Exception:
-                self.max_pos_text.set("Max: —")
+                pass
+        brackets = self._brackets.get(symbol) if self.market.get() == "Futures" else None
+        if brackets:
+            max_lev = max((int(b.get("initialLeverage") or 1) for b in brackets), default=125)
+            new_vals = tuple(str(n) for n in range(1, max_lev + 1))
+            if tuple(self.leverage_box["values"]) != new_vals:
+                self.leverage_box["values"] = new_vals
+            try:
+                if int(self.leverage.get().strip()) > max_lev:
+                    self.leverage.set(str(max_lev))
+            except Exception:
+                pass
+        max_pos: Decimal | None = None
+        try:
+            lev = Decimal(self.leverage.get().strip())
+            lev_int = int(lev)
+            if self._balance_val is not None:
+                max_pos = self._balance_val * lev
+            if brackets:
+                caps = [
+                    Decimal(str(b["notionalCap"]))
+                    for b in brackets
+                    if int(b.get("initialLeverage") or 0) >= lev_int and b.get("notionalCap") is not None
+                ]
+                if caps:
+                    bracket_cap = max(caps)
+                    max_pos = min(max_pos, bracket_cap) if max_pos is not None else bracket_cap
+        except Exception:
+            max_pos = None
+        if max_pos is not None:
+            self.max_pos_text.set(f"Max: {max_pos:,.0f} USDT")
         else:
             self.max_pos_text.set("Max: —")
         over_max = False
@@ -1362,13 +1393,6 @@ class TradingApp:
             highlightbackground=SELL if over_max else BORDER,
             highlightcolor=SELL if over_max else PRIMARY,
         )
-        symbol = self._symbol()
-        if symbol in self.config.get("symbols", []) and self.config.get("last_symbol") != symbol:
-            self.config["last_symbol"] = symbol
-            try:
-                save_config(self.config)
-            except Exception:
-                pass
         base, _quote = _split_symbol(symbol) if symbol else ("", "")
         self.base_text.set(f" {base}" if base else "")
         try:
@@ -1820,6 +1844,7 @@ class TradingApp:
         self.distance_text.set("")
         self._show_positions([])
         self._render_order_rows([])
+        self._brackets = {}
         self._sync_quote()
         self.log("Disconnected.", "warn")
         self._refresh_buttons()
@@ -2118,6 +2143,13 @@ class TradingApp:
             raise
         self.client = client
         self._stop_multi = False
+        if market == "futures":
+            try:
+                self._brackets = await client.leverage_brackets()
+            except Exception:
+                self._brackets = {}
+        else:
+            self._brackets = {}
         self._guard_task = asyncio.create_task(self._guard_loop(market))
         self._account_task = asyncio.create_task(self._account_sync_loop())
         return {"offset": client.clock_offset_ms, "market": client.market}
