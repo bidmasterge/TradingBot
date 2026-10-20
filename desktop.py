@@ -1784,6 +1784,25 @@ class TradingApp:
         ttk.Label(frame, textvariable=notice, style="Muted.TLabel").grid(
             row=7, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
+        self._center_window(window)
+
+    def _center_window(self, window: tk.Toplevel) -> None:
+        window.update_idletasks()
+        w = window.winfo_reqwidth()
+        h = window.winfo_reqheight()
+        rx = self.root.winfo_rootx()
+        ry = self.root.winfo_rooty()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        if rw > 100 and rh > 100:
+            x = rx + (rw - w) // 2
+            y = ry + (rh - h) // 2
+        else:
+            sw = window.winfo_screenwidth()
+            sh = window.winfo_screenheight()
+            x = (sw - w) // 2
+            y = (sh - h) // 2
+        window.geometry(f"+{max(0, x)}+{max(0, y)}")
 
     def open_coins_window(self) -> None:
         window = tk.Toplevel(self.root)
@@ -1845,6 +1864,8 @@ class TradingApp:
         ttk.Button(buttons, text="Remove", command=remove).pack(side="left")
         ttk.Button(buttons, text="Save", command=save).pack(side="left", padx=(8, 0))
         ttk.Label(frame, textvariable=notice, style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self._center_window(window)
+        entry.focus_set()
 
     def open_update_window(self) -> None:
         cfg = load_update_config()
@@ -1883,6 +1904,7 @@ class TradingApp:
             window.destroy()
 
         ttk.Button(frame, text="Save", command=save).grid(row=3, column=1, sticky="e", pady=(8, 0))
+        self._center_window(window)
 
     def on_update(self) -> None:
         cfg = load_update_config()
