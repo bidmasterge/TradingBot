@@ -748,6 +748,8 @@ class TradingApp:
         self._protected: dict[int, dict] = {}
         self._kept: list[dict] = []
         self._positions_by_item: dict[str, dict] = {}
+        self._last_order_rows: list[dict] = []
+        self._last_position_rows: list[dict] = []
         self._brackets: dict[str, list[dict]] = {}
         self._top_coin_btns: list[tk.Button] = []
         self._rules: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
@@ -782,6 +784,8 @@ class TradingApp:
         self.protection = tk.BooleanVar(value=True)
         self.protection_keep = tk.BooleanVar(value=False)
         self.protect_steps = tk.StringVar(value="3")
+        self.filter_orders_symbol = tk.BooleanVar(value=False)
+        self.filter_positions_symbol = tk.BooleanVar(value=False)
 
         self._build()
         self._reload_choices()
@@ -1063,6 +1067,12 @@ class TradingApp:
         tk.Label(orders_head, text="Open orders", bg=CARD, fg=FG, font=(SANS, 14, "bold")).pack(side="left")
         self.order_count_badge = tk.Label(orders_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 12, "bold"), padx=8)
         self.order_count_badge.pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(
+            orders_head,
+            text="Selected coin only",
+            variable=self.filter_orders_symbol,
+            command=lambda: self._render_order_rows(self._last_order_rows),
+        ).pack(side="left", padx=(12, 0))
         self.refresh_btn = self._btn(orders_head, "Refresh", self.on_refresh, "ghost")
         self.refresh_btn.pack(side="right")
         self.tree = DataTable(
@@ -1094,6 +1104,12 @@ class TradingApp:
         tk.Label(pos_head, text="Open positions", bg=CARD, fg=FG, font=(SANS, 14, "bold")).pack(side="left")
         self.pos_count_badge = tk.Label(pos_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 12, "bold"), padx=8)
         self.pos_count_badge.pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(
+            pos_head,
+            text="Selected coin only",
+            variable=self.filter_positions_symbol,
+            command=lambda: self._show_positions(self._last_position_rows),
+        ).pack(side="left", padx=(12, 0))
         self.pos_refresh_btn = self._btn(pos_head, "Refresh", self.on_refresh, "ghost")
         self.pos_refresh_btn.pack(side="right")
         self.pos_tree = DataTable(
@@ -1401,6 +1417,10 @@ class TradingApp:
         base, _quote = _split_symbol(symbol) if symbol else ("", "")
         self.base_text.set(f" {base}" if base else "")
         self._render_top_coins()
+        if self.filter_orders_symbol.get():
+            self._render_order_rows(self._last_order_rows)
+        if self.filter_positions_symbol.get():
+            self._show_positions(self._last_position_rows)
         try:
             usdt = Decimal(self.usdt.get().strip())
             price = Decimal(self.price.get().strip())
@@ -2093,8 +2113,14 @@ class TradingApp:
         self._positions_by_item.clear()
         if not isinstance(rows, list):
             rows = []
+        self._last_position_rows = list(rows)
+        active_sym = self._symbol()
+        only_sym = bool(self.filter_positions_symbol.get())
         table_rows: list[dict] = []
         for row in rows:
+            sym = str(row.get("symbol") or "")
+            if only_sym and active_sym and sym != active_sym:
+                continue
             amt = Decimal(str(row.get("positionAmt") or "0"))
             if amt == 0:
                 continue
@@ -2614,14 +2640,20 @@ class TradingApp:
         self._refresh_buttons()
 
     def _render_order_rows(self, rows: list) -> None:
+        self._last_order_rows = list(rows)
+        active_sym = self._symbol()
+        only_sym = bool(self.filter_orders_symbol.get())
         table_rows: list[dict] = []
         for row in rows:
+            sym = str(row.get("symbol") or "")
+            if only_sym and active_sym and sym != active_sym:
+                continue
             side = str(row.get("side", ""))
             table_rows.append(
                 {
                     "values": (
                         row.get("orderId", ""),
-                        row.get("symbol", ""),
+                        sym,
                         side,
                         row.get("positionSide") or "—",
                         row.get("price", ""),
