@@ -776,6 +776,10 @@ class TradingApp:
         self.base_text = tk.StringVar(value="")
         self.distance_text = tk.StringVar(value="")
         self._last_px: Decimal | None = None
+        self._best_bid: Decimal | None = None
+        self._best_ask: Decimal | None = None
+        self._depth_symbol: str = ""
+        self.exec_mode = tk.StringVar(value="Trade")
         self.detail = tk.StringVar(value="Not connected")
         self.interval = tk.StringVar(value="1 sec")
         self.order_count = tk.StringVar(value="0")
@@ -832,6 +836,33 @@ class TradingApp:
             header, text=f"v{ver_str}", bg=CARD, fg=MUTED_FG, font=(MONO, 10, "bold")
         )
         self.version_label.pack(side="right", padx=(0, 8))
+        mode_switch = tk.Frame(header, bg=BORDER, padx=1, pady=1)
+        mode_switch.pack(side="right", padx=(0, 12))
+        self.trade_mode_btn = tk.Button(
+            mode_switch,
+            text="Trade",
+            command=lambda: self._set_exec_mode("Trade"),
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=3,
+            font=(SANS, 10, "bold"),
+            cursor="hand2",
+        )
+        self.trade_mode_btn.pack(side="left")
+        self.order_mode_btn = tk.Button(
+            mode_switch,
+            text="Order",
+            command=lambda: self._set_exec_mode("Order"),
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=3,
+            font=(SANS, 10, "bold"),
+            cursor="hand2",
+        )
+        self.order_mode_btn.pack(side="left")
+        self._paint_mode_switch()
         tk.Frame(shell, bg=BORDER, height=1).pack(fill="x")
 
         account = tk.Frame(shell, bg=MUTED)
@@ -1195,7 +1226,7 @@ class TradingApp:
             tot = tk.Label(row, text="", bg=INPUT, fg=FG, font=(MONO, 10), anchor="e", width=13, cursor="hand2")
             tot.pack(side="right")
             for w in (row, px, tot):
-                w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p))
+                w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p, "SELL"))
                 w.bind("<Enter>", lambda _e, r=row, ws=(row, px, tot): [x.configure(bg=MUTED) for x in ws])
                 w.bind("<Leave>", lambda _e, r=row, ws=(row, px, tot): [x.configure(bg=INPUT) for x in ws])
             self.ask_rows.append((row, px, tot))
@@ -1224,15 +1255,94 @@ class TradingApp:
             tot = tk.Label(row, text="", bg=INPUT, fg=FG, font=(MONO, 10), anchor="e", width=13, cursor="hand2")
             tot.pack(side="right")
             for w in (row, px, tot):
-                w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p))
+                w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p, "BUY"))
                 w.bind("<Enter>", lambda _e, r=row, ws=(row, px, tot): [x.configure(bg=MUTED) for x in ws])
                 w.bind("<Leave>", lambda _e, r=row, ws=(row, px, tot): [x.configure(bg=INPUT) for x in ws])
             self.bid_rows.append((row, px, tot))
 
-    def _pick_book_price(self, label: tk.Label) -> None:
+    def _pick_book_price(self, label: tk.Label, side: str | None = None) -> None:
         val = label.cget("text").strip().replace(",", "")
         if val and val != "—" and DECIMAL.fullmatch(val):
             self.price.set(dec_str(Decimal(val)))
+        if side in {"BUY", "SELL"}:
+            self.side.set(side)
+
+    def _set_exec_mode(self, mode: str) -> None:
+        self.exec_mode.set(mode)
+        if mode == "Order" and not (self.protection.get() or self.protection_keep.get()):
+            self.protection.set(True)
+            self._refresh_buttons()
+        self._paint_mode_switch()
+        self.log(f"Switched to {mode} mode.")
+
+    def _paint_mode_switch(self) -> None:
+        is_trade = self.exec_mode.get() == "Trade"
+        self.trade_mode_btn.configure(
+            bg=PRIMARY if is_trade else INPUT,
+            fg=PRIMARY_FG if is_trade else MUTED_FG,
+            activebackground="#c9a24a" if is_trade else MUTED,
+            activeforeground=PRIMARY_FG if is_trade else FG,
+        )
+        self.order_mode_btn.configure(
+            bg=BUY if not is_trade else INPUT,
+            fg="#10241c" if not is_trade else MUTED_FG,
+            activebackground="#34b87e" if not is_trade else MUTED,
+            activeforeground="#10241c" if not is_trade else FG,
+        )
+
+    def _current_band(self) -> Decimal:
+        if not (self.protection.get() or self.protection_keep.get()):
+            return Decimal(0)
+        try:
+            steps = int(self.protect_steps.get())
+        except Exception:
+            steps = 3
+        market = "futures" if self.market.get() == "Futures" else "spot"
+        rules = self._rules.get((market, self._symbol()))
+        raw_px = self.price.get().strip()
+        user_step = price_step(raw_px) if DECIMAL.fullmatch(raw_px) else Decimal("0.01")
+        tick = choose_step(user_step, rules[0] if rules else user_step)
+        return tick * steps
+
+    def _would_enter_position(
+        self, side: str, price: Decimal, bid: Decimal | None = None, ask: Decimal | None = None
+    ) -> bool:
+        b = bid if bid is not None else self._best_bid
+        a = ask if ask is not None else self._best_ask
+        band = self._current_band()
+        if side == "BUY":
+            if a is not None and price >= a:
+                return True
+            if b is not None and b <= price + band:
+                return True
+        elif side == "SELL":
+            if b is not None and price <= b:
+                return True
+            if a is not None and a >= price - band:
+                return True
+        return False
+
+    def _confirm_if_order_mode(self, side: str, price: Decimal) -> bool:
+        if self.exec_mode.get() != "Order":
+            return True
+        protecting = bool(self.protection.get() or self.protection_keep.get())
+        if not protecting or self._would_enter_position(side, price):
+            return bool(messagebox.askyesno("Trading Bot", "are you sure", parent=self.root))
+        return True
+
+    async def _confirm_on_ui(self) -> bool:
+        fut: asyncio.Future[bool] = self.loop.create_future()
+
+        def ask() -> None:
+            try:
+                ans = bool(messagebox.askyesno("Trading Bot", "are you sure", parent=self.root))
+            except Exception:
+                ans = False
+            if not fut.done():
+                self.loop.call_soon_threadsafe(fut.set_result, ans)
+
+        self.root.after(0, ask)
+        return await fut
 
     def _apply_theme(self) -> None:
         style = ttk.Style()
@@ -1361,6 +1471,9 @@ class TradingApp:
 
     def _sync_quote(self, *_args: object) -> None:
         symbol = self._symbol()
+        if symbol != self._depth_symbol:
+            self._best_bid = None
+            self._best_ask = None
         if symbol in self.config.get("symbols", []) and self.config.get("last_symbol") != symbol:
             self.config["last_symbol"] = symbol
             try:
@@ -1986,6 +2099,12 @@ class TradingApp:
         spec = self._trade_spec()
         if spec is None:
             return
+        if self.exec_mode.get() == "Order":
+            protecting = bool(self.protection.get() or self.protection_keep.get())
+            if not protecting or self._would_enter_position(spec["side"], spec["price"]):
+                if not messagebox.askyesno("Trading Bot", "are you sure", parent=self.root):
+                    return
+                spec["confirmed_enter"] = True
         keep = bool(self.protection_keep.get())
         protect = bool(self.protection.get()) or keep
         steps = int(self.protect_steps.get())
@@ -2034,6 +2153,12 @@ class TradingApp:
         spec = self._trade_spec()
         if spec is None:
             return
+        if self.exec_mode.get() == "Order":
+            protecting = bool(self.protection.get() or self.protection_keep.get())
+            if not protecting or self._would_enter_position(spec["side"], spec["price"]):
+                if not messagebox.askyesno("Trading Bot", "are you sure", parent=self.root):
+                    return
+                spec["confirmed_enter"] = True
         count = int(self.order_count.get())
         interval = int(self.interval.get().split()[0])
         keep = bool(self.protection_keep.get())
@@ -2339,6 +2464,19 @@ class TradingApp:
         qty = quote_to_base(spec["usdt"], price, lot)
         if qty <= 0:
             raise ValueError("Quantity rounds to zero at this price. Raise the USDT amount.")
+        if self.exec_mode.get() == "Order" and not spec.get("confirmed_enter"):
+            bid, ask = self._best_bid, self._best_ask
+            if bid is None and ask is None:
+                try:
+                    last_px = Decimal(await self._price(spec["symbol"]))
+                    bid = last_px
+                    ask = last_px
+                except Exception:
+                    pass
+            if self._would_enter_position(spec["side"], price, bid, ask):
+                if not await self._confirm_on_ui():
+                    raise RuntimeError("Order canceled.")
+                spec["confirmed_enter"] = True
         params = {
             "symbol": spec["symbol"],
             "side": spec["side"],
@@ -2396,6 +2534,7 @@ class TradingApp:
         ordered = sorted(rows, key=lambda row: Decimal(str(row.get("price") or "0")), reverse=direction > 0)
         moved = 0
         failed = 0
+        confirmed_move = False
         for row in ordered:
             order_id = int(row.get("orderId") or 0)
             if str(row.get("type") or "LIMIT") not in {"LIMIT", "LIMIT_MAKER"}:
@@ -2411,6 +2550,14 @@ class TradingApp:
                     lambda order_id=order_id: self.log(f"Order {order_id} would move to zero. It stays."),
                 )
                 continue
+            if (
+                self.exec_mode.get() == "Order"
+                and not confirmed_move
+                and self._would_enter_position(str(row.get("side") or ""), new_price)
+            ):
+                if not await self._confirm_on_ui():
+                    break
+                confirmed_move = True
             try:
                 result, _local_ns, _net_ns = await self._shift_order(market, row, new_price, lot)
                 new_id = moved_order_id(result, order_id)
@@ -3042,6 +3189,9 @@ class TradingApp:
         if asks and bids:
             best_ask = Decimal(str(asks[0][0]))
             best_bid = Decimal(str(bids[0][0]))
+            self._best_ask = best_ask
+            self._best_bid = best_bid
+            self._depth_symbol = self._symbol()
             self.book_mid_label.configure(text=dec_str(best_bid))
             self.book_spread_label.configure(text=f"Spread {dec_str(best_ask - best_bid)}")
 
