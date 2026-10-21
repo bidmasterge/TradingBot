@@ -779,7 +779,7 @@ class TradingApp:
         self._best_bid: Decimal | None = None
         self._best_ask: Decimal | None = None
         self._depth_symbol: str = ""
-        self.exec_mode = tk.StringVar(value="Trade")
+        self.exec_mode = tk.StringVar(value="Order")
         self.detail = tk.StringVar(value="Not connected")
         self.interval = tk.StringVar(value="1 sec")
         self.order_count = tk.StringVar(value="0")
