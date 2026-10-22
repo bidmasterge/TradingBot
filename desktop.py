@@ -1314,43 +1314,23 @@ class TradingApp:
             activeforeground="#10241c" if not is_trade else FG,
         )
 
-    def _current_band(self) -> Decimal:
-        if not (self.protection.get() or self.protection_keep.get()):
-            return Decimal(0)
-        try:
-            steps = int(self.protect_steps.get())
-        except Exception:
-            steps = 3
-        market = "futures" if self.market.get() == "Futures" else "spot"
-        rules = self._rules.get((market, self._symbol()))
-        raw_px = self.price.get().strip()
-        user_step = price_step(raw_px) if DECIMAL.fullmatch(raw_px) else Decimal("0.01")
-        tick = choose_step(user_step, rules[0] if rules else user_step)
-        return tick * steps
-
     def _would_enter_position(
         self, side: str, price: Decimal, bid: Decimal | None = None, ask: Decimal | None = None
     ) -> bool:
         b = bid if bid is not None else self._best_bid
         a = ask if ask is not None else self._best_ask
-        band = self._current_band()
         if side == "BUY":
             if a is not None and price >= a:
                 return True
-            if b is not None and b <= price + band:
-                return True
         elif side == "SELL":
             if b is not None and price <= b:
-                return True
-            if a is not None and a >= price - band:
                 return True
         return False
 
     def _confirm_if_order_mode(self, side: str, price: Decimal) -> bool:
         if self.exec_mode.get() != "Order":
             return True
-        protecting = bool(self.protection.get() or self.protection_keep.get())
-        if not protecting or self._would_enter_position(side, price):
+        if self._would_enter_position(side, price):
             return bool(messagebox.askyesno("Trading Bot", "are you sure", parent=self.root))
         return True
 
@@ -2124,12 +2104,10 @@ class TradingApp:
         spec = self._trade_spec()
         if spec is None:
             return
-        if self.exec_mode.get() == "Order":
-            protecting = bool(self.protection.get() or self.protection_keep.get())
-            if not protecting or self._would_enter_position(spec["side"], spec["price"]):
-                if not messagebox.askyesno("Trading Bot", "are you sure", parent=self.root):
-                    return
-                spec["confirmed_enter"] = True
+        if self.exec_mode.get() == "Order" and self._would_enter_position(spec["side"], spec["price"]):
+            if not messagebox.askyesno("Trading Bot", "are you sure", parent=self.root):
+                return
+            spec["confirmed_enter"] = True
         keep = bool(self.protection_keep.get())
         protect = bool(self.protection.get()) or keep
         steps = int(self.protect_steps.get())
@@ -2178,12 +2156,10 @@ class TradingApp:
         spec = self._trade_spec()
         if spec is None:
             return
-        if self.exec_mode.get() == "Order":
-            protecting = bool(self.protection.get() or self.protection_keep.get())
-            if not protecting or self._would_enter_position(spec["side"], spec["price"]):
-                if not messagebox.askyesno("Trading Bot", "are you sure", parent=self.root):
-                    return
-                spec["confirmed_enter"] = True
+        if self.exec_mode.get() == "Order" and self._would_enter_position(spec["side"], spec["price"]):
+            if not messagebox.askyesno("Trading Bot", "are you sure", parent=self.root):
+                return
+            spec["confirmed_enter"] = True
         count = int(self.order_count.get())
         interval = int(self.interval.get().split()[0])
         keep = bool(self.protection_keep.get())
