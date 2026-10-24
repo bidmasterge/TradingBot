@@ -52,6 +52,7 @@ BORDER = "#3e424a"
 INPUT = "#1e2025"
 DECIMAL = re.compile(r"^\d+(\.\d+)?$")
 SYMBOL = re.compile(r"^[A-Z0-9]{5,20}$")
+BOOK_LEVELS = 20
 
 
 def enable_dpi() -> None:
@@ -555,12 +556,16 @@ class DataTable(tk.Frame):
         on_row_click=None,
         on_cell_click=None,
         action_cols: set[int] | None = None,
+        input_cols: set[int] | None = None,
     ) -> None:
         super().__init__(master, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
         self._cols = columns
         self._on_row_click = on_row_click
         self._on_cell_click = on_cell_click
         self._action_cols = action_cols or set()
+        self._input_cols = input_cols or set()
+        self._input_vars: dict[tuple[str, int], tk.StringVar] = {}
+        self._input_widgets: dict[tuple[str, int], tk.Entry] = {}
         self._rows: list[dict] = []
         self._selected: int | None = None
         self._hover: tuple[int | None, int | None] = (None, None)
@@ -603,6 +608,47 @@ class DataTable(tk.Frame):
             self._selected = None
         self._draw()
 
+    def get_input(self, key: str, col: int) -> str:
+        var = self._input_vars.get((key, col))
+        return var.get().strip() if var is not None else ""
+
+    def input_values(self, col: int) -> dict[str, str]:
+        return {key: var.get().strip() for (key, c), var in self._input_vars.items() if c == col}
+
+    def _ensure_input(self, key: str, col: int, initial: str = "") -> tk.Entry:
+        ident = (key, col)
+        if ident not in self._input_vars:
+            self._input_vars[ident] = tk.StringVar(value=initial)
+        existing = self._input_widgets.get(ident)
+        if existing is not None and existing.winfo_exists():
+            return existing
+        entry = tk.Entry(
+            self._body,
+            textvariable=self._input_vars[ident],
+            bg=INPUT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+            justify="right",
+            font=(MONO, 12, "bold"),
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=PRIMARY,
+        )
+        entry.bind("<MouseWheel>", self._handle_wheel)
+        self._input_widgets[ident] = entry
+        return entry
+
+    def _prune_inputs(self, live_keys: set[str]) -> None:
+        for ident in list(self._input_widgets):
+            key, _col = ident
+            if key in live_keys:
+                continue
+            widget = self._input_widgets.pop(ident)
+            if widget.winfo_exists():
+                widget.destroy()
+            self._input_vars.pop(ident, None)
+
     def _draw(self) -> None:
         w = max(self._body.winfo_width(), self._head.winfo_width(), 300)
         spans = self._spans(w)
@@ -618,6 +664,7 @@ class DataTable(tk.Frame):
         total_h = max(len(self._rows) * self.ROW_H, 1)
         self._body.configure(scrollregion=(0, 0, w, total_h))
         h_row, h_col = self._hover
+        live_keys: set[str] = set()
         for r_idx, row in enumerate(self._rows):
             y0 = r_idx * self.ROW_H
             y1 = y0 + self.ROW_H
@@ -631,9 +678,23 @@ class DataTable(tk.Frame):
             buttons: dict[int, str] = row.get("buttons") or {}
             mid_y = y0 + self.ROW_H // 2
             for c_idx, (_cid, _title, _weight, align) in enumerate(self._cols):
-                if c_idx >= len(values):
+                if c_idx >= len(values) and c_idx not in self._input_cols:
                     continue
                 x0, x1 = spans[c_idx]
+                if c_idx in self._input_cols:
+                    key = str(row.get("key") or r_idx)
+                    live_keys.add(key)
+                    inputs = row.get("inputs") or {}
+                    initial = str(inputs.get(c_idx, values[c_idx] if c_idx < len(values) else "") or "")
+                    entry = self._ensure_input(key, c_idx, initial)
+                    self._body.create_window(
+                        (x0 + x1) // 2,
+                        mid_y,
+                        window=entry,
+                        width=max(48, x1 - x0 - 10),
+                        height=28,
+                    )
+                    continue
                 text = str(values[c_idx])
                 if c_idx in buttons:
                     kind = buttons[c_idx]
@@ -668,6 +729,7 @@ class DataTable(tk.Frame):
                     fg = colors.get(c_idx, FG)
                     tx = (x0 + 12) if align == "w" else ((x1 - 12) if align == "e" else (x0 + x1) // 2)
                     self._body.create_text(tx, mid_y, text=text, anchor=align, fill=fg, font=(MONO, 14, "bold"))
+        self._prune_inputs(live_keys)
 
     def _hit(self, event: tk.Event) -> tuple[int | None, int | None]:
         if not self._rows:
@@ -748,6 +810,7 @@ class TradingApp:
         self._protected: dict[int, dict] = {}
         self._kept: list[dict] = []
         self._positions_by_item: dict[str, dict] = {}
+        self._position_limit_px: dict[str, str] = {}
         self._last_order_rows: list[dict] = []
         self._last_position_rows: list[dict] = []
         self._brackets: dict[str, list[dict]] = {}
@@ -909,7 +972,7 @@ class TradingApp:
         left.pack(side="right", fill="y")
         left.pack_propagate(False)
         tk.Frame(body, bg=BORDER, width=1).pack(side="right", fill="y")
-        book_panel = tk.Frame(body, bg=CARD, width=280)
+        book_panel = tk.Frame(body, bg=CARD, width=300)
         book_panel.pack(side="right", fill="y")
         book_panel.pack_propagate(False)
         tk.Frame(body, bg=BORDER, width=1).pack(side="right", fill="y")
@@ -1148,17 +1211,19 @@ class TradingApp:
         self.pos_tree = DataTable(
             pos_pane,
             (
-                ("symbol", "SYMBOL", 115, "w"),
-                ("side", "SIDE", 85, "w"),
-                ("size", "SIZE (USDT)", 130, "e"),
-                ("entry", "ENTRY", 115, "e"),
-                ("mark", "MARK", 115, "e"),
-                ("pnl", "PNL (USDT)", 125, "e"),
-                ("limit_close", "LIMIT", 100, "center"),
-                ("market_close", "MARKET", 105, "center"),
+                ("symbol", "SYMBOL", 105, "w"),
+                ("side", "SIDE", 75, "w"),
+                ("size", "SIZE (USDT)", 115, "e"),
+                ("entry", "ENTRY", 100, "e"),
+                ("mark", "MARK", 100, "e"),
+                ("pnl", "PNL (USDT)", 110, "e"),
+                ("limit_px", "LIMIT PX", 120, "e"),
+                ("limit_close", "LIMIT", 90, "center"),
+                ("market_close", "MARKET", 95, "center"),
             ),
             on_cell_click=self._on_position_cell_action,
-            action_cols={6, 7},
+            action_cols={7, 8},
+            input_cols={6},
         )
         self.pos_tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         self.empty_positions = tk.Label(
@@ -1201,6 +1266,42 @@ class TradingApp:
         self.order_id.trace_add("write", lambda *_args: self._refresh_buttons())
         self.side.trace_add("write", lambda *_args: self._refresh_buttons())
 
+    def _on_book_wheel(self, event: tk.Event):
+        if getattr(self, "_book_canvas", None) is None:
+            return
+        self._book_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _sync_book_canvas(self, _event: object = None) -> None:
+        canvas = getattr(self, "_book_canvas", None)
+        if canvas is None:
+            return
+        canvas.itemconfigure(self._book_inner_id, width=max(canvas.winfo_width(), 1))
+        bbox = canvas.bbox("all")
+        if bbox is not None:
+            canvas.configure(scrollregion=bbox)
+
+    def _add_book_row(
+        self, parent: tk.Frame, side: str
+    ) -> tuple[tk.Frame, tk.Label, tk.Label, tk.Label]:
+        color = SELL if side == "SELL" else BUY
+        row = tk.Frame(parent, bg=INPUT, cursor="hand2", highlightthickness=1, highlightbackground=INPUT)
+        row.pack(fill="x", padx=4, pady=0)
+        dot = tk.Label(
+            row, text="", bg=INPUT, fg=PRIMARY, font=(SANS, 8, "bold"), width=1, anchor="center", cursor="hand2"
+        )
+        dot.pack(side="left", padx=(1, 1))
+        px = tk.Label(row, text="—", bg=INPUT, fg=color, font=(MONO, 11, "bold"), anchor="w", cursor="hand2")
+        px.pack(side="left", padx=(0, 0))
+        tot = tk.Label(row, text="", bg=INPUT, fg=FG, font=(MONO, 10), anchor="e", width=13, cursor="hand2")
+        tot.pack(side="right", padx=(0, 2))
+        for w in (row, dot, px, tot):
+            w.bind("<ButtonPress-1>", lambda _e, p=px, s=side: self._pick_book_price(p, s))
+            w.bind("<Enter>", lambda _e, r=row: self._on_book_row_hover(r, True))
+            w.bind("<Leave>", lambda _e, r=row: self._on_book_row_hover(r, False))
+            w.bind("<MouseWheel>", self._on_book_wheel)
+        return row, dot, px, tot
+
     def _build_order_book(self, parent: tk.Frame) -> None:
         head = tk.Frame(parent, bg=CARD)
         head.pack(fill="x", padx=12, pady=(12, 6))
@@ -1217,27 +1318,29 @@ class TradingApp:
             side="right", padx=6, pady=4
         )
 
-        self.ask_rows: list[tuple[tk.Frame, tk.Label, tk.Label, tk.Label]] = []
-        asks_wrap = tk.Frame(parent, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
-        asks_wrap.pack(fill="x", padx=12, pady=(4, 0))
-        for _ in range(12):
-            row = tk.Frame(asks_wrap, bg=INPUT, cursor="hand2", highlightthickness=1, highlightbackground=INPUT)
-            row.pack(fill="x", padx=4, pady=1)
-            dot = tk.Label(
-                row, text="", bg=INPUT, fg=PRIMARY, font=(SANS, 8, "bold"), width=1, anchor="center", cursor="hand2"
-            )
-            dot.pack(side="left", padx=(1, 1))
-            px = tk.Label(row, text="—", bg=INPUT, fg=SELL, font=(MONO, 11, "bold"), anchor="w", cursor="hand2")
-            px.pack(side="left", padx=(0, 0))
-            tot = tk.Label(row, text="", bg=INPUT, fg=FG, font=(MONO, 10), anchor="e", width=13, cursor="hand2")
-            tot.pack(side="right", padx=(0, 2))
-            for w in (row, dot, px, tot):
-                w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p, "SELL"))
-                w.bind("<Enter>", lambda _e, r=row: self._on_book_row_hover(r, True))
-                w.bind("<Leave>", lambda _e, r=row: self._on_book_row_hover(r, False))
-            self.ask_rows.append((row, dot, px, tot))
+        scroll_wrap = tk.Frame(parent, bg=CARD)
+        scroll_wrap.pack(fill="both", expand=True, padx=0, pady=(0, 8))
+        canvas = tk.Canvas(scroll_wrap, bg=CARD, highlightthickness=0, bd=0)
+        scroll = ttk.Scrollbar(scroll_wrap, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas, bg=CARD)
+        self._book_inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        inner.bind("<Configure>", self._sync_book_canvas)
+        canvas.bind("<Configure>", self._sync_book_canvas)
+        canvas.bind("<MouseWheel>", self._on_book_wheel)
+        inner.bind("<MouseWheel>", self._on_book_wheel)
+        self._book_canvas = canvas
+        self._book_inner = inner
 
-        mid_bar = tk.Frame(parent, bg=SECONDARY, highlightthickness=1, highlightbackground=BORDER, cursor="hand2")
+        self.ask_rows: list[tuple[tk.Frame, tk.Label, tk.Label, tk.Label]] = []
+        asks_wrap = tk.Frame(inner, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
+        asks_wrap.pack(fill="x", padx=12, pady=(4, 0))
+        for _ in range(BOOK_LEVELS):
+            self.ask_rows.append(self._add_book_row(asks_wrap, "SELL"))
+
+        mid_bar = tk.Frame(inner, bg=SECONDARY, highlightthickness=1, highlightbackground=BORDER, cursor="hand2")
         mid_bar.pack(fill="x", padx=12, pady=6)
         self.book_mid_label = tk.Label(
             mid_bar, text="—", bg=SECONDARY, fg=FG, font=(MONO, 13, "bold"), cursor="hand2"
@@ -1249,26 +1352,13 @@ class TradingApp:
         self.book_spread_label.pack(side="right", padx=8, pady=5)
         for w in (mid_bar, self.book_mid_label, self.book_spread_label):
             w.bind("<ButtonPress-1>", lambda _e: self._pick_book_price(self.book_mid_label))
+            w.bind("<MouseWheel>", self._on_book_wheel)
 
         self.bid_rows: list[tuple[tk.Frame, tk.Label, tk.Label, tk.Label]] = []
-        bids_wrap = tk.Frame(parent, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
+        bids_wrap = tk.Frame(inner, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
         bids_wrap.pack(fill="x", padx=12, pady=(0, 12))
-        for _ in range(12):
-            row = tk.Frame(bids_wrap, bg=INPUT, cursor="hand2", highlightthickness=1, highlightbackground=INPUT)
-            row.pack(fill="x", padx=4, pady=1)
-            dot = tk.Label(
-                row, text="", bg=INPUT, fg=PRIMARY, font=(SANS, 8, "bold"), width=1, anchor="center", cursor="hand2"
-            )
-            dot.pack(side="left", padx=(1, 1))
-            px = tk.Label(row, text="—", bg=INPUT, fg=BUY, font=(MONO, 11, "bold"), anchor="w", cursor="hand2")
-            px.pack(side="left", padx=(0, 0))
-            tot = tk.Label(row, text="", bg=INPUT, fg=FG, font=(MONO, 10), anchor="e", width=13, cursor="hand2")
-            tot.pack(side="right", padx=(0, 2))
-            for w in (row, dot, px, tot):
-                w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p, "BUY"))
-                w.bind("<Enter>", lambda _e, r=row: self._on_book_row_hover(r, True))
-                w.bind("<Leave>", lambda _e, r=row: self._on_book_row_hover(r, False))
-            self.bid_rows.append((row, dot, px, tot))
+        for _ in range(BOOK_LEVELS):
+            self.bid_rows.append(self._add_book_row(bids_wrap, "BUY"))
 
     def _pick_book_price(self, label: tk.Label, side: str | None = None) -> None:
         val = label.cget("text").strip().replace(",", "")
@@ -2293,6 +2383,8 @@ class TradingApp:
         if not isinstance(rows, list):
             rows = []
         self._last_position_rows = list(rows)
+        for key, val in self.pos_tree.input_values(6).items():
+            self._position_limit_px[key] = val
         active_sym = self._symbol()
         only_sym = bool(self.filter_positions_symbol.get())
         table_rows: list[dict] = []
@@ -2312,15 +2404,19 @@ class TradingApp:
             notional_raw = Decimal(str(row.get("notional") or "0"))
             size_usdt = abs(notional_raw) if notional_raw != 0 else size_abs * (mark_px if mark_px > 0 else entry_px)
             pnl = Decimal(str(row.get("unRealizedProfit") or row.get("unrealizedProfit") or "0"))
+            key = f"{sym}|{pos_side}|{'L' if is_long else 'S'}"
+            limit_px = self._position_limit_px.get(key, "")
             info = {
                 "symbol": str(row.get("symbol") or ""),
                 "amt": amt,
                 "qty": size_abs,
                 "positionSide": pos_side,
                 "markPrice": mark_px,
+                "key": key,
             }
             table_rows.append(
                 {
+                    "key": key,
                     "values": (
                         row.get("symbol", ""),
                         side_label,
@@ -2328,11 +2424,13 @@ class TradingApp:
                         dec_str(entry_px),
                         dec_str(mark_px),
                         f"{pnl:+,.2f}",
+                        limit_px,
                         "Limit",
                         "Market",
                     ),
                     "colors": {5: BUY if pnl >= 0 else SELL},
-                    "buttons": {6: "default", 7: "danger"},
+                    "buttons": {7: "default", 8: "danger"},
+                    "inputs": {6: limit_px},
                     "meta": info,
                 }
             )
@@ -2353,12 +2451,22 @@ class TradingApp:
             self.empty_positions.lift()
 
     def _on_position_cell_action(self, _r_idx: int, c_idx: int, row: dict) -> None:
-        if c_idx not in {6, 7}:
+        if c_idx not in {7, 8}:
             return
         info = row.get("meta")
         if not info or not self.connected or self.busy:
             return
-        mode = "LIMIT" if c_idx == 6 else "MARKET"
+        mode = "LIMIT" if c_idx == 7 else "MARKET"
+        if mode == "LIMIT":
+            key = str(row.get("key") or info.get("key") or "")
+            raw = self.pos_tree.get_input(key, 6).replace(",", "")
+            if key:
+                self._position_limit_px[key] = raw
+            if not raw or not DECIMAL.fullmatch(raw) or Decimal(raw) <= 0:
+                self.log("Set a limit price on this position first.")
+                return
+            info = dict(info)
+            info["limitPrice"] = Decimal(raw)
         self.spawn(self._close_position(info, mode), self._on_position_closed)
 
     async def _close_position(self, info: dict, mode: str) -> tuple:
@@ -2380,13 +2488,9 @@ class TradingApp:
             params["positionSide"] = "BOTH"
             params["reduceOnly"] = "true"
         if mode == "LIMIT":
-            raw_px = self.price.get().strip()
-            if symbol == self._symbol() and DECIMAL.fullmatch(raw_px) and Decimal(raw_px) > 0:
-                px = Decimal(raw_px)
-            elif info["markPrice"] > 0:
-                px = info["markPrice"]
-            else:
-                px = Decimal(await self._price(symbol))
+            px = info.get("limitPrice")
+            if not isinstance(px, Decimal) or px <= 0:
+                raise RuntimeError("Set a limit price on this position first.")
             rules = await self._rules_for("futures", symbol)
             if rules and rules[0] > 0:
                 px = floor_step(px, rules[0])
@@ -3189,7 +3293,7 @@ class TradingApp:
     def _render_depth(self, asks: list, bids: list) -> None:
         if self._closing:
             return
-        top_asks = asks[:12]
+        top_asks = asks[:BOOK_LEVELS]
         ask_cum: list[tuple[Decimal, Decimal]] = []
         running_ask = Decimal(0)
         for item in top_asks:
@@ -3197,7 +3301,7 @@ class TradingApp:
             q = Decimal(str(item[1]))
             running_ask += p * q
             ask_cum.append((p, running_ask))
-        padded_asks = [None] * (12 - len(ask_cum)) + list(reversed(ask_cum))
+        padded_asks = [None] * (BOOK_LEVELS - len(ask_cum)) + list(reversed(ask_cum))
         for idx, item in enumerate(padded_asks):
             _row, _dot, px_lbl, tot_lbl = self.ask_rows[idx]
             if item is None:
@@ -3208,7 +3312,7 @@ class TradingApp:
                 px_lbl.configure(text=dec_str(p))
                 tot_lbl.configure(text=f"{cum_usdt:,.0f}")
         running_bid = Decimal(0)
-        for idx in range(12):
+        for idx in range(BOOK_LEVELS):
             _row, _dot, px_lbl, tot_lbl = self.bid_rows[idx]
             if idx >= len(bids):
                 px_lbl.configure(text="—")

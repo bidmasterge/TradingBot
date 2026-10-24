@@ -1,0 +1,15 @@
+---
+description: Always publish Trading Bot changes as an in-app update
+alwaysApply: true
+---
+
+# Always publish updates
+
+After finishing any feature, fix, or requested change in this project:
+
+1. Bump `update.json` version (patch +1, e.g. 1.0.20 -> 1.0.21).
+2. Commit the relevant files with a concise message.
+3. Push to `origin` `main` so other PCs can click Update.
+
+Do this every time. Do not wait to be asked "did you send it for update?"
+If the user says to forget/revert a change, do not publish that change.
