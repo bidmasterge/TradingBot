@@ -612,6 +612,13 @@ class DataTable(tk.Frame):
         var = self._input_vars.get((key, col))
         return var.get().strip() if var is not None else ""
 
+    def set_input(self, key: str, col: int, value: str) -> None:
+        ident = (key, col)
+        if ident in self._input_vars:
+            self._input_vars[ident].set(value)
+        else:
+            self._input_vars[ident] = tk.StringVar(value=value)
+
     def input_values(self, col: int) -> dict[str, str]:
         return {key: var.get().strip() for (key, c), var in self._input_vars.items() if c == col}
 
@@ -1366,9 +1373,28 @@ class TradingApp:
             cleaned = dec_str(Decimal(val))
             self._picked_book_price = cleaned
             self.price.set(cleaned)
+            self._fill_position_limit_price(cleaned)
         if side in {"BUY", "SELL"}:
             self.side.set(side)
         self._refresh_book_highlight()
+
+    def _fill_position_limit_price(self, price: str) -> None:
+        symbol = self._symbol()
+        if not symbol or not hasattr(self, "pos_tree"):
+            return
+        for row in self._last_position_rows:
+            if str(row.get("symbol") or "") != symbol:
+                continue
+            try:
+                amt = Decimal(str(row.get("positionAmt") or "0"))
+            except Exception:
+                continue
+            if amt == 0:
+                continue
+            pos_side = str(row.get("positionSide") or "BOTH")
+            key = f"{symbol}|{pos_side}|{'L' if amt > 0 else 'S'}"
+            self._position_limit_px[key] = price
+            self.pos_tree.set_input(key, 6, price)
 
     def _on_book_row_hover(self, row: tk.Frame, entering: bool) -> None:
         if entering:
