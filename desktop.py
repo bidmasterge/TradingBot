@@ -818,6 +818,7 @@ class TradingApp:
         self._kept: list[dict] = []
         self._positions_by_item: dict[str, dict] = {}
         self._position_limit_px: dict[str, str] = {}
+        self._position_close_pct: dict[str, str] = {}
         self._last_order_rows: list[dict] = []
         self._last_position_rows: list[dict] = []
         self._brackets: dict[str, list[dict]] = {}
@@ -1218,19 +1219,20 @@ class TradingApp:
         self.pos_tree = DataTable(
             pos_pane,
             (
-                ("symbol", "SYMBOL", 105, "w"),
-                ("side", "SIDE", 75, "w"),
-                ("size", "SIZE (USDT)", 115, "e"),
-                ("entry", "ENTRY", 100, "e"),
-                ("mark", "MARK", 100, "e"),
-                ("pnl", "PNL (USDT)", 110, "e"),
-                ("limit_px", "LIMIT PX", 120, "e"),
-                ("limit_close", "LIMIT", 90, "center"),
-                ("market_close", "MARKET", 95, "center"),
+                ("symbol", "SYMBOL", 95, "w"),
+                ("side", "SIDE", 70, "w"),
+                ("size", "SIZE (USDT)", 105, "e"),
+                ("entry", "ENTRY", 95, "e"),
+                ("mark", "MARK", 95, "e"),
+                ("pnl", "PNL (USDT)", 100, "e"),
+                ("limit_px", "LIMIT PX", 110, "e"),
+                ("close_pct", "CLOSE %", 80, "e"),
+                ("limit_close", "LIMIT", 85, "center"),
+                ("market_close", "MARKET", 90, "center"),
             ),
             on_cell_click=self._on_position_cell_action,
-            action_cols={7, 8},
-            input_cols={6},
+            action_cols={8, 9},
+            input_cols={6, 7},
         )
         self.pos_tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         self.empty_positions = tk.Label(
@@ -2411,6 +2413,8 @@ class TradingApp:
         self._last_position_rows = list(rows)
         for key, val in self.pos_tree.input_values(6).items():
             self._position_limit_px[key] = val
+        for key, val in self.pos_tree.input_values(7).items():
+            self._position_close_pct[key] = val
         active_sym = self._symbol()
         only_sym = bool(self.filter_positions_symbol.get())
         table_rows: list[dict] = []
@@ -2432,6 +2436,7 @@ class TradingApp:
             pnl = Decimal(str(row.get("unRealizedProfit") or row.get("unrealizedProfit") or "0"))
             key = f"{sym}|{pos_side}|{'L' if is_long else 'S'}"
             limit_px = self._position_limit_px.get(key, "")
+            close_pct = self._position_close_pct.get(key, "100") or "100"
             info = {
                 "symbol": str(row.get("symbol") or ""),
                 "amt": amt,
@@ -2451,12 +2456,13 @@ class TradingApp:
                         dec_str(mark_px),
                         f"{pnl:+,.2f}",
                         limit_px,
+                        close_pct,
                         "Limit",
                         "Market",
                     ),
                     "colors": {5: BUY if pnl >= 0 else SELL},
-                    "buttons": {7: "default", 8: "danger"},
-                    "inputs": {6: limit_px},
+                    "buttons": {8: "default", 9: "danger"},
+                    "inputs": {6: limit_px, 7: close_pct},
                     "meta": info,
                 }
             )
@@ -2477,21 +2483,30 @@ class TradingApp:
             self.empty_positions.lift()
 
     def _on_position_cell_action(self, _r_idx: int, c_idx: int, row: dict) -> None:
-        if c_idx not in {7, 8}:
+        if c_idx not in {8, 9}:
             return
         info = row.get("meta")
         if not info or not self.connected or self.busy:
             return
-        mode = "LIMIT" if c_idx == 7 else "MARKET"
+        mode = "LIMIT" if c_idx == 8 else "MARKET"
+        key = str(row.get("key") or info.get("key") or "")
+        info = dict(info)
+        raw_pct = self.pos_tree.get_input(key, 7).replace(",", "").replace("%", "").strip()
+        if not raw_pct:
+            raw_pct = "100"
+        if key:
+            self._position_close_pct[key] = raw_pct
+        if not DECIMAL.fullmatch(raw_pct) or Decimal(raw_pct) <= 0 or Decimal(raw_pct) > 100:
+            self.log("Set close percent from 1 to 100.")
+            return
+        info["closePct"] = Decimal(raw_pct)
         if mode == "LIMIT":
-            key = str(row.get("key") or info.get("key") or "")
             raw = self.pos_tree.get_input(key, 6).replace(",", "")
             if key:
                 self._position_limit_px[key] = raw
             if not raw or not DECIMAL.fullmatch(raw) or Decimal(raw) <= 0:
                 self.log("Set a limit price on this position first.")
                 return
-            info = dict(info)
             info["limitPrice"] = Decimal(raw)
         self.spawn(self._close_position(info, mode), self._on_position_closed)
 
@@ -2501,6 +2516,15 @@ class TradingApp:
         qty: Decimal = info["qty"]
         pos_side = info["positionSide"]
         close_side = "SELL" if amt > 0 else "BUY"
+        pct = info.get("closePct")
+        if not isinstance(pct, Decimal) or pct <= 0:
+            pct = Decimal(100)
+        rules = await self._rules_for("futures", symbol)
+        if pct < 100:
+            lot = rules[1] if rules else Decimal("0.00000001")
+            qty = floor_step(qty * pct / Decimal(100), lot)
+            if qty <= 0:
+                raise RuntimeError("Close percent is too small for this position.")
         params: dict = {
             "symbol": symbol,
             "side": close_side,
@@ -2517,7 +2541,6 @@ class TradingApp:
             px = info.get("limitPrice")
             if not isinstance(px, Decimal) or px <= 0:
                 raise RuntimeError("Set a limit price on this position first.")
-            rules = await self._rules_for("futures", symbol)
             if rules and rules[0] > 0:
                 px = floor_step(px, rules[0])
             params["price"] = dec_str(px)
