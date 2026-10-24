@@ -1217,21 +1217,25 @@ class TradingApp:
             side="right", padx=6, pady=4
         )
 
-        self.ask_rows: list[tuple[tk.Frame, tk.Label, tk.Label]] = []
+        self.ask_rows: list[tuple[tk.Frame, tk.Label, tk.Label, tk.Label]] = []
         asks_wrap = tk.Frame(parent, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
         asks_wrap.pack(fill="x", padx=12, pady=(4, 0))
         for _ in range(12):
             row = tk.Frame(asks_wrap, bg=INPUT, cursor="hand2", highlightthickness=1, highlightbackground=INPUT)
             row.pack(fill="x", padx=4, pady=1)
+            dot = tk.Label(
+                row, text="", bg=INPUT, fg=PRIMARY, font=(SANS, 8, "bold"), width=1, anchor="center", cursor="hand2"
+            )
+            dot.pack(side="left", padx=(1, 1))
             px = tk.Label(row, text="—", bg=INPUT, fg=SELL, font=(MONO, 11, "bold"), anchor="w", cursor="hand2")
-            px.pack(side="left", padx=(2, 0))
+            px.pack(side="left", padx=(0, 0))
             tot = tk.Label(row, text="", bg=INPUT, fg=FG, font=(MONO, 10), anchor="e", width=13, cursor="hand2")
             tot.pack(side="right", padx=(0, 2))
-            for w in (row, px, tot):
+            for w in (row, dot, px, tot):
                 w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p, "SELL"))
                 w.bind("<Enter>", lambda _e, r=row: self._on_book_row_hover(r, True))
                 w.bind("<Leave>", lambda _e, r=row: self._on_book_row_hover(r, False))
-            self.ask_rows.append((row, px, tot))
+            self.ask_rows.append((row, dot, px, tot))
 
         mid_bar = tk.Frame(parent, bg=SECONDARY, highlightthickness=1, highlightbackground=BORDER, cursor="hand2")
         mid_bar.pack(fill="x", padx=12, pady=6)
@@ -1246,21 +1250,25 @@ class TradingApp:
         for w in (mid_bar, self.book_mid_label, self.book_spread_label):
             w.bind("<ButtonPress-1>", lambda _e: self._pick_book_price(self.book_mid_label))
 
-        self.bid_rows: list[tuple[tk.Frame, tk.Label, tk.Label]] = []
+        self.bid_rows: list[tuple[tk.Frame, tk.Label, tk.Label, tk.Label]] = []
         bids_wrap = tk.Frame(parent, bg=INPUT, highlightthickness=1, highlightbackground=BORDER)
         bids_wrap.pack(fill="x", padx=12, pady=(0, 12))
         for _ in range(12):
             row = tk.Frame(bids_wrap, bg=INPUT, cursor="hand2", highlightthickness=1, highlightbackground=INPUT)
             row.pack(fill="x", padx=4, pady=1)
+            dot = tk.Label(
+                row, text="", bg=INPUT, fg=PRIMARY, font=(SANS, 8, "bold"), width=1, anchor="center", cursor="hand2"
+            )
+            dot.pack(side="left", padx=(1, 1))
             px = tk.Label(row, text="—", bg=INPUT, fg=BUY, font=(MONO, 11, "bold"), anchor="w", cursor="hand2")
-            px.pack(side="left", padx=(2, 0))
+            px.pack(side="left", padx=(0, 0))
             tot = tk.Label(row, text="", bg=INPUT, fg=FG, font=(MONO, 10), anchor="e", width=13, cursor="hand2")
             tot.pack(side="right", padx=(0, 2))
-            for w in (row, px, tot):
+            for w in (row, dot, px, tot):
                 w.bind("<ButtonPress-1>", lambda _e, p=px: self._pick_book_price(p, "BUY"))
                 w.bind("<Enter>", lambda _e, r=row: self._on_book_row_hover(r, True))
                 w.bind("<Leave>", lambda _e, r=row: self._on_book_row_hover(r, False))
-            self.bid_rows.append((row, px, tot))
+            self.bid_rows.append((row, dot, px, tot))
 
     def _pick_book_price(self, label: tk.Label, side: str | None = None) -> None:
         val = label.cget("text").strip().replace(",", "")
@@ -1279,17 +1287,39 @@ class TradingApp:
             self._hovered_book_row = None
         self._refresh_book_highlight()
 
+    def _open_order_prices(self) -> set[str]:
+        symbol = self._symbol()
+        prices: set[str] = set()
+        if not symbol:
+            return prices
+        for row in self._last_order_rows:
+            if str(row.get("symbol") or "") != symbol:
+                continue
+            raw = str(row.get("price") or "").strip().replace(",", "")
+            if not raw or not DECIMAL.fullmatch(raw):
+                continue
+            try:
+                prices.add(dec_str(Decimal(raw)))
+            except Exception:
+                continue
+        return prices
+
     def _refresh_book_highlight(self) -> None:
+        if not getattr(self, "ask_rows", None) or not getattr(self, "bid_rows", None):
+            return
         picked = self._picked_book_price
-        for row, px_lbl, tot_lbl in self.ask_rows + self.bid_rows:
+        open_prices = self._open_order_prices()
+        for row, dot_lbl, px_lbl, tot_lbl in self.ask_rows + self.bid_rows:
             px_text = px_lbl.cget("text").strip()
             is_picked = bool(picked and px_text != "—" and px_text == picked)
             is_hover = row is self._hovered_book_row
+            has_order = bool(px_text != "—" and px_text in open_prices)
             bg = "#3d3522" if is_picked else (MUTED if is_hover else INPUT)
             edge = PRIMARY if is_picked else bg
             row.configure(bg=bg, highlightbackground=edge, highlightcolor=edge)
             px_lbl.configure(bg=bg)
             tot_lbl.configure(bg=bg)
+            dot_lbl.configure(bg=bg, text="●" if has_order else "")
 
     def _set_exec_mode(self, mode: str) -> None:
         self.exec_mode.set(mode)
@@ -1479,6 +1509,7 @@ class TradingApp:
             self._best_bid = None
             self._best_ask = None
             self._picked_book_price = ""
+            self._refresh_book_highlight()
         if symbol in self.config.get("symbols", []) and self.config.get("last_symbol") != symbol:
             self.config["last_symbol"] = symbol
             try:
@@ -2844,6 +2875,7 @@ class TradingApp:
             self.empty_orders.configure(text="No open orders" if self.connected else "Connect to load open orders")
             self.empty_orders.place(relx=0.5, rely=0.58, anchor="center")
             self.empty_orders.lift()
+        self._refresh_book_highlight()
 
     async def _account_sync_loop(self) -> None:
         try:
@@ -3167,7 +3199,7 @@ class TradingApp:
             ask_cum.append((p, running_ask))
         padded_asks = [None] * (12 - len(ask_cum)) + list(reversed(ask_cum))
         for idx, item in enumerate(padded_asks):
-            _row, px_lbl, tot_lbl = self.ask_rows[idx]
+            _row, _dot, px_lbl, tot_lbl = self.ask_rows[idx]
             if item is None:
                 px_lbl.configure(text="—")
                 tot_lbl.configure(text="")
@@ -3177,7 +3209,7 @@ class TradingApp:
                 tot_lbl.configure(text=f"{cum_usdt:,.0f}")
         running_bid = Decimal(0)
         for idx in range(12):
-            _row, px_lbl, tot_lbl = self.bid_rows[idx]
+            _row, _dot, px_lbl, tot_lbl = self.bid_rows[idx]
             if idx >= len(bids):
                 px_lbl.configure(text="—")
                 tot_lbl.configure(text="")
