@@ -997,7 +997,6 @@ class TradingApp:
         self.side_box = ttk.Combobox(
             symbol_row, textvariable=self.side, values=("BUY", "SELL"), width=6, state="readonly", font=(SANS, 13, "bold")
         )
-        self.side_box.pack(side="right", ipady=3)
         self.position_row = tk.Frame(instrument, bg=CARD)
         tk.Label(self.position_row, text="Position", bg=CARD, fg=MUTED_FG, font=(SANS, 13), width=8, anchor="w").pack(
             side="left", pady=(8, 0)
@@ -1376,7 +1375,7 @@ class TradingApp:
             self._picked_book_price = cleaned
             self.price.set(cleaned)
             self._fill_position_limit_price(cleaned)
-        if side in {"BUY", "SELL"}:
+        if side in {"BUY", "SELL"} and self.exec_mode.get() == "Order":
             self.side.set(side)
         self._refresh_book_highlight()
 
@@ -1444,8 +1443,18 @@ class TradingApp:
         if mode == "Order" and not (self.protection.get() or self.protection_keep.get()):
             self.protection.set(True)
             self._refresh_buttons()
+        self._sync_side_box()
         self._paint_mode_switch()
         self.log(f"Switched to {mode} mode.")
+
+    def _sync_side_box(self) -> None:
+        if not hasattr(self, "side_box"):
+            return
+        if self.exec_mode.get() == "Trade":
+            if not self.side_box.winfo_ismapped():
+                self.side_box.pack(side="right", ipady=3)
+        else:
+            self.side_box.pack_forget()
 
     def _paint_mode_switch(self) -> None:
         is_trade = self.exec_mode.get() == "Trade"
