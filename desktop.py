@@ -298,6 +298,17 @@ def fetch_rules(market: str, symbol: str) -> tuple[Decimal, Decimal]:
     return tick, lot
 
 
+def fetch_public_depth(market: str, symbol: str) -> tuple[list, list]:
+    if market == "futures":
+        url = f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit=20"
+    else:
+        url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit=20"
+    req = urllib.request.Request(url, headers={"User-Agent": "TradingBot"})
+    with urllib.request.urlopen(req, timeout=2) as response:
+        payload = orjson.loads(response.read())
+    return payload.get("asks") or [], payload.get("bids") or []
+
+
 class SymbolBox(ttk.Combobox):
     ROW_H = 38
     MAX_VISIBLE = 8
@@ -850,6 +861,10 @@ class TradingApp:
         self._best_bid: Decimal | None = None
         self._best_ask: Decimal | None = None
         self._depth_symbol: str = ""
+        self._wanted_book_symbol: str = ""
+        self._wanted_book_market: str = ""
+        self._book_gen: int = 0
+        self._save_after: str | None = None
         self._picked_book_price: str = ""
         self._hovered_book_row: tk.Frame | None = None
         self.exec_mode = tk.StringVar(value="Order")
@@ -870,6 +885,7 @@ class TradingApp:
         self.thread.start()
         self._book_task = asyncio.run_coroutine_threadsafe(self._depth_loop(), self.loop)
         self._update_check_task = asyncio.run_coroutine_threadsafe(self._update_check_loop(), self.loop)
+        self._kick_book(self._symbol())
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.log("Save an API, add coin pairs, choose a market, then Connect.")
 
@@ -1632,17 +1648,21 @@ class TradingApp:
 
     def _sync_quote(self, *_args: object) -> None:
         symbol = self._symbol()
-        if symbol != self._depth_symbol:
-            self._best_bid = None
-            self._best_ask = None
-            self._picked_book_price = ""
-            self._refresh_book_highlight()
+        market_key = "futures" if self.market.get() == "Futures" else "spot"
+        if symbol in self.config.get("symbols", []) and (
+            symbol != self._wanted_book_symbol or market_key != self._wanted_book_market
+        ):
+            self._wanted_book_symbol = symbol
+            self._wanted_book_market = market_key
+            if symbol != self._depth_symbol:
+                self._best_bid = None
+                self._best_ask = None
+                self._picked_book_price = ""
+                self._refresh_book_highlight()
+            self._kick_book(symbol)
         if symbol in self.config.get("symbols", []) and self.config.get("last_symbol") != symbol:
             self.config["last_symbol"] = symbol
-            try:
-                save_config(self.config)
-            except Exception:
-                pass
+            self._schedule_save()
         brackets = self._brackets.get(symbol) if self.market.get() == "Futures" else None
         if brackets:
             max_lev = max((int(b.get("initialLeverage") or 1) for b in brackets), default=125)
@@ -1713,6 +1733,41 @@ class TradingApp:
         else:
             qty = Decimal(0)
         self.qty_text.set(dec_str(qty))
+
+    def _schedule_save(self) -> None:
+        if self._save_after is not None:
+            try:
+                self.root.after_cancel(self._save_after)
+            except Exception:
+                pass
+        self._save_after = self.root.after(400, self._flush_config)
+
+    def _flush_config(self) -> None:
+        self._save_after = None
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+
+    def _kick_book(self, symbol: str) -> None:
+        if self._closing or not symbol:
+            return
+        self._book_gen += 1
+        gen = self._book_gen
+        market = "futures" if self.market.get() == "Futures" else "spot"
+        try:
+            asyncio.run_coroutine_threadsafe(self._fetch_public_depth(market, symbol, gen), self.loop)
+        except RuntimeError:
+            self.root.after(80, lambda s=symbol: self._kick_book(s) if not self._closing else None)
+
+    async def _fetch_public_depth(self, market: str, symbol: str, gen: int) -> None:
+        try:
+            asks, bids = await asyncio.to_thread(fetch_public_depth, market, symbol)
+        except Exception:
+            return
+        if self._closing or gen != self._book_gen or self._symbol() != symbol:
+            return
+        self.root.after(0, lambda a=asks, b=bids, s=symbol: self._render_depth(a, b, fill_price=True, symbol=s))
 
     def _clear_log(self) -> None:
         self.output.configure(state="normal")
@@ -3254,6 +3309,12 @@ class TradingApp:
 
     def on_close(self) -> None:
         self._closing = True
+        if self._save_after is not None:
+            try:
+                self.root.after_cancel(self._save_after)
+            except Exception:
+                pass
+            self._save_after = None
         symbol = self._symbol()
         if symbol in self.config.get("symbols", []):
             self.config["last_symbol"] = symbol
@@ -3296,39 +3357,73 @@ class TradingApp:
     async def _depth_loop(self) -> None:
         ws = None
         current = ("", "")
+        req_id = 0
         try:
             while not self._closing:
                 try:
-                    symbol = self._symbol().lower()
                     market = "futures" if self.market.get() == "Futures" else "spot"
-                    if not symbol or not SYMBOL.fullmatch(symbol.upper()):
-                        if ws is not None:
-                            await ws.close()
-                            ws = None
-                            current = ("", "")
-                        await asyncio.sleep(0.3)
+                    raw_sym = self._symbol()
+                    wanted = raw_sym.lower() if raw_sym in self.config.get("symbols", []) else current[1]
+                    if not wanted:
+                        await asyncio.sleep(0.15)
                         continue
-                    target = (market, symbol)
-                    if target != current or ws is None:
+                    host = "fstream.binance.com" if market == "futures" else "stream.binance.com:9443"
+                    if ws is None or current[0] != market:
                         if ws is not None:
-                            await ws.close()
-                        host = "fstream.binance.com" if market == "futures" else "stream.binance.com:9443"
+                            try:
+                                await asyncio.wait_for(ws.close(), timeout=0.4)
+                            except Exception:
+                                pass
+                            ws = None
                         ws = await connect(
-                            f"wss://{host}/ws/{symbol}@depth20@100ms",
+                            f"wss://{host}/stream",
                             compression=None,
                             ping_interval=20,
+                            open_timeout=5,
                             max_size=1_048_576,
                         )
-                        current = target
+                        current = (market, "")
+                    if wanted != current[1]:
+                        if current[1]:
+                            req_id += 1
+                            await ws.send(
+                                orjson.dumps(
+                                    {
+                                        "method": "UNSUBSCRIBE",
+                                        "params": [f"{current[1]}@depth20@100ms"],
+                                        "id": req_id,
+                                    }
+                                ).decode()
+                            )
+                        req_id += 1
+                        await ws.send(
+                            orjson.dumps(
+                                {
+                                    "method": "SUBSCRIBE",
+                                    "params": [f"{wanted}@depth20@100ms"],
+                                    "id": req_id,
+                                }
+                            ).decode()
+                        )
+                        current = (market, wanted)
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
+                        raw = await asyncio.wait_for(ws.recv(), timeout=0.15)
                     except TimeoutError:
                         continue
                     payload = orjson.loads(raw)
-                    asks = payload.get("asks") or payload.get("a") or []
-                    bids = payload.get("bids") or payload.get("b") or []
+                    if not isinstance(payload, dict):
+                        continue
+                    if "result" in payload and "data" not in payload:
+                        continue
+                    data = payload.get("data", payload)
+                    stream = str(payload.get("stream") or "")
+                    if stream and current[1] and not stream.startswith(f"{current[1]}@"):
+                        continue
+                    asks = data.get("asks") or data.get("a") or []
+                    bids = data.get("bids") or data.get("b") or []
                     if asks or bids:
-                        self.root.after(0, lambda a=asks, b=bids: self._render_depth(a, b))
+                        sym = current[1].upper()
+                        self.root.after(0, lambda a=asks, b=bids, s=sym: self._render_depth(a, b, symbol=s))
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -3339,7 +3434,7 @@ class TradingApp:
                             pass
                     ws = None
                     current = ("", "")
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.4)
         except asyncio.CancelledError:
             if ws is not None:
                 try:
@@ -3348,8 +3443,10 @@ class TradingApp:
                     pass
             raise
 
-    def _render_depth(self, asks: list, bids: list) -> None:
+    def _render_depth(self, asks: list, bids: list, fill_price: bool = False, symbol: str = "") -> None:
         if self._closing:
+            return
+        if symbol and symbol != self._symbol():
             return
         top_asks = asks[:BOOK_LEVELS]
         ask_cum: list[tuple[Decimal, Decimal]] = []
@@ -3389,6 +3486,10 @@ class TradingApp:
             self._depth_symbol = self._symbol()
             self.book_mid_label.configure(text=dec_str(best_bid))
             self.book_spread_label.configure(text=f"Spread {dec_str(best_ask - best_bid)}")
+            if fill_price:
+                self._last_px = best_bid
+                self.last_price.set(dec_str(best_bid))
+                self.price.set(dec_str(best_bid))
         self._refresh_book_highlight()
 
     def run(self) -> None:
