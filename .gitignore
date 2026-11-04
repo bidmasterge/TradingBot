@@ -9,3 +9,6 @@ __pycache__/
 *.pem
 *.pyc
 *.tmp
+.update_tmp/
+*.updatetmp
+_apply_update.py

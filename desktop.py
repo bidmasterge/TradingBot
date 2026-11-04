@@ -11,7 +11,9 @@ import asyncio
 import ctypes
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -208,26 +210,97 @@ def _ver_tuple(ver: str) -> tuple[int, ...]:
     return tuple(nums) if nums else (0,)
 
 
+def _update_headers(token: str = "") -> dict[str, str]:
+    headers = {"User-Agent": "TradingBot-Updater", "Cache-Control": "no-cache", "Pragma": "no-cache"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _http_json(url: str, token: str = "", timeout: int = 8) -> dict:
+    req = urllib.request.Request(url, headers=_update_headers(token))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def check_remote_version() -> str | None:
+    newer, _err = peek_remote_version()
+    return newer
+
+
+def peek_remote_version() -> tuple[str | None, str | None]:
     cfg = load_update_config()
     repo = cfg.get("repo") or "bidmasterge/TradingBot"
     branch = cfg.get("branch") or "main"
     token = cfg.get("token") or ""
-    url = f"https://raw.githubusercontent.com/{repo}/{branch}/update.json?t={int(time.time())}"
-    headers = {"User-Agent": "TradingBot-Updater", "Cache-Control": "no-cache"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            remote = json.loads(resp.read().decode("utf-8"))
-        remote_ver = str(remote.get("version") or "").strip()
-        local_ver = str(cfg.get("version") or "1.0.0").strip()
-        if remote_ver and _ver_tuple(remote_ver) > _ver_tuple(local_ver):
-            return remote_ver
-    except Exception:
-        return None
-    return None
+    local_ver = str(cfg.get("version") or "1.0.0").strip()
+    stamp = int(time.time())
+    urls = [
+        f"https://raw.githubusercontent.com/{repo}/{branch}/update.json?t={stamp}",
+        f"https://github.com/{repo}/raw/{branch}/update.json?t={stamp}",
+        f"https://cdn.jsdelivr.net/gh/{repo}@{branch}/update.json?t={stamp}",
+    ]
+    last_err = "could not reach GitHub"
+    for url in urls:
+        try:
+            remote = _http_json(url, token)
+            remote_ver = str(remote.get("version") or "").strip()
+            if remote_ver and _ver_tuple(remote_ver) > _ver_tuple(local_ver):
+                return remote_ver, None
+            if remote_ver:
+                return None, None
+        except Exception as exc:
+            last_err = str(exc)
+    return None, last_err
+
+
+def _download_update_zip(repo: str, branch: str, token: str) -> bytes:
+    urls = [
+        f"https://codeload.github.com/{repo}/zip/refs/heads/{branch}",
+        f"https://github.com/{repo}/archive/refs/heads/{branch}.zip",
+    ]
+    last_exc: Exception | None = None
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers=_update_headers(token))
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            if data[:2] == b"PK":
+                return data
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code == 404:
+                continue
+        except Exception as exc:
+            last_exc = exc
+    if isinstance(last_exc, urllib.error.HTTPError) and last_exc.code == 404:
+        raise RuntimeError(
+            f"GitHub repo '{repo}' ({branch}) not found or is private. Right-click Update to set repo/token."
+        ) from last_exc
+    raise RuntimeError(f"Update download failed: {last_exc}") from last_exc
+
+
+def _write_update_file(dest: Path, data: bytes) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".updatetmp")
+    last: Exception | None = None
+    for _ in range(8):
+        try:
+            tmp.write_bytes(data)
+            os.replace(tmp, dest)
+            return
+        except PermissionError as exc:
+            last = exc
+            time.sleep(0.25)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+    if last:
+        raise last
+    raise PermissionError(str(dest))
 
 
 def pull_latest_from_github() -> int:
@@ -235,23 +308,11 @@ def pull_latest_from_github() -> int:
     repo = cfg.get("repo") or "bidmasterge/TradingBot"
     branch = cfg.get("branch") or "main"
     token = cfg.get("token") or ""
-    url = f"https://codeload.github.com/{repo}/zip/refs/heads/{branch}"
-    headers = {"User-Agent": "TradingBot-Updater"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw_zip = resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise RuntimeError(
-                f"GitHub repo '{repo}' ({branch}) not found or is private. Right-click Update to set repo/token."
-            ) from exc
-        raise RuntimeError(f"Update download failed: HTTP {exc.code}") from exc
+    raw_zip = _download_update_zip(repo, branch, token)
     skip_exact = {"profiles.json", ".env"}
-    skip_Top = {".git", ".venv", "runtime", "Design", "__pycache__"}
+    skip_top = {".git", ".venv", "runtime", "Design", "__pycache__", ".update_tmp"}
     updated = 0
+    failed: list[str] = []
     with zipfile.ZipFile(io.BytesIO(raw_zip)) as zf:
         for info in zf.infolist():
             if info.is_dir():
@@ -260,19 +321,76 @@ def pull_latest_from_github() -> int:
             if len(parts) < 2:
                 continue
             rel_parts = parts[1:]
-            if rel_parts[0] in skip_Top:
+            if rel_parts[0] in skip_top:
                 continue
             rel_path = Path(*rel_parts)
             if rel_path.name in skip_exact or rel_path.suffix in {".pyc", ".pem", ".tmp"}:
                 continue
+            data = zf.read(info.filename)
             dest = ROOT / rel_path
-            dest.parent.mkdir(parents=True, exist_ok=True)
             try:
-                dest.write_bytes(zf.read(info.filename))
+                _write_update_file(dest, data)
                 updated += 1
             except PermissionError:
-                continue
+                failed.append(str(rel_path))
+                stage = ROOT / ".update_tmp" / rel_path
+                stage.parent.mkdir(parents=True, exist_ok=True)
+                stage.write_bytes(data)
+                updated += 1
+    if failed:
+        (ROOT / ".update_tmp" / ".pending").write_text("\n".join(failed), encoding="utf-8")
     return updated
+
+
+APPLY_UPDATE_PY = r"""
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+pid = int(sys.argv[1])
+root = Path(sys.argv[2])
+python = sys.argv[3] if len(sys.argv) > 3 else sys.executable
+stage = root / ".update_tmp"
+
+def alive(process_id: int) -> bool:
+    try:
+        os.kill(process_id, 0)
+        return True
+    except OSError:
+        return False
+
+deadline = time.time() + 20
+while time.time() < deadline and alive(pid):
+    time.sleep(0.2)
+time.sleep(0.4)
+
+if stage.exists():
+    for src in stage.rglob("*"):
+        if not src.is_file() or src.name.startswith("."):
+            continue
+        dest = root / src.relative_to(stage)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        data = src.read_bytes()
+        for _ in range(12):
+            try:
+                tmp = dest.with_name(dest.name + ".updatetmp")
+                tmp.write_bytes(data)
+                os.replace(tmp, dest)
+                break
+            except PermissionError:
+                time.sleep(0.3)
+    shutil.rmtree(stage, ignore_errors=True)
+
+flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+subprocess.Popen([python, str(root / "desktop.py")], cwd=str(root), creationflags=flags)
+try:
+    Path(__file__).unlink()
+except Exception:
+    pass
+"""
 
 
 def fetch_rules(market: str, symbol: str) -> tuple[Decimal, Decimal]:
@@ -2243,14 +2361,20 @@ class TradingApp:
         self.spawn(asyncio.to_thread(pull_latest_from_github), self._on_updated)
 
     def _on_updated(self, count: int) -> None:
+        if count <= 0:
+            self.log("Update had no files.", "warn")
+            self._refresh_buttons()
+            return
         self.log(f"Updated {count} file(s). Restarting app...", "success")
         self._refresh_buttons()
-        self.root.after(400, self._restart_app)
+        self.root.after(300, self._restart_app)
 
     def _restart_app(self) -> None:
+        helper = ROOT / "_apply_update.py"
+        helper.write_text(APPLY_UPDATE_PY, encoding="utf-8")
         try:
             subprocess.Popen(
-                [sys.executable, str(ROOT / "desktop.py")],
+                [sys.executable, str(helper), str(os.getpid()), str(ROOT), sys.executable],
                 cwd=str(ROOT),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -3335,18 +3459,27 @@ class TradingApp:
         self.root.destroy()
 
     async def _update_check_loop(self) -> None:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(0.6)
+        logged_err = False
         while not self._closing:
             try:
-                remote_ver = await asyncio.to_thread(check_remote_version)
-                if remote_ver and remote_ver != self._update_available:
+                remote_ver, err = await asyncio.to_thread(peek_remote_version)
+                if err and not logged_err:
+                    logged_err = True
+                    self.root.after(0, lambda e=err: self.log(f"Update check failed: {e}", "warn"))
+                elif remote_ver and remote_ver != self._update_available:
+                    logged_err = False
                     self._update_available = remote_ver
                     self.root.after(0, lambda v=remote_ver: self._flag_update(v))
+                elif not err:
+                    logged_err = False
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
-            await asyncio.sleep(30.0)
+            except Exception as exc:
+                if not logged_err:
+                    logged_err = True
+                    self.root.after(0, lambda e=str(exc): self.log(f"Update check failed: {e}", "warn"))
+            await asyncio.sleep(20.0)
 
     def _flag_update(self, remote_ver: str) -> None:
         if self._closing:
