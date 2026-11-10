@@ -55,6 +55,7 @@ INPUT = "#1e2025"
 DECIMAL = re.compile(r"^\d+(\.\d+)?$")
 SYMBOL = re.compile(r"^[A-Z0-9]{5,20}$")
 BOOK_LEVELS = 20
+RECENT_COINS = 15
 
 
 def enable_dpi() -> None:
@@ -180,6 +181,25 @@ def load_config() -> dict:
     data.setdefault("symbols", [])
     if not isinstance(data.get("symbol_counts"), dict):
         data["symbol_counts"] = {}
+    recent_raw = data.get("recent_symbols")
+    recent: list[str] = []
+    if isinstance(recent_raw, list):
+        for item in recent_raw:
+            sym = str(item).strip().upper()
+            if sym and SYMBOL.fullmatch(sym) and sym not in recent:
+                recent.append(sym)
+    if not recent:
+        counts = data.get("symbol_counts") or {}
+        if isinstance(counts, dict):
+            ranked = sorted(counts.keys(), key=lambda key: -int(counts.get(key, 0) or 0))
+            for key in ranked:
+                sym = str(key).strip().upper()
+                if SYMBOL.fullmatch(sym) and sym not in recent:
+                    recent.append(sym)
+        last = str(data.get("last_symbol") or "").strip().upper()
+        if last and SYMBOL.fullmatch(last):
+            recent = [last] + [sym for sym in recent if sym != last]
+    data["recent_symbols"] = recent[:RECENT_COINS]
     return data
 
 
@@ -619,6 +639,7 @@ class SymbolBox(ttk.Combobox):
         self.selection_clear()
         self._hide()
         self.focus_set()
+        self.event_generate("<<CoinChosen>>")
 
     def _choose_active(self, _event: object = None):
         if self._popup is None or not self._popup.winfo_viewable() or not self._matches:
@@ -999,6 +1020,7 @@ class TradingApp:
 
         self._build()
         self._reload_choices()
+        self._bump_symbol_usage(self._symbol())
         self._refresh_buttons()
         self.thread.start()
         self._book_task = asyncio.run_coroutine_threadsafe(self._depth_loop(), self.loop)
@@ -1128,6 +1150,7 @@ class TradingApp:
         self._btn(symbol_row, "Coins", self.open_coins_window, big=True).pack(side="left")
         self.symbol_box = SymbolBox(symbol_row, textvariable=self.symbol, width=14, font=(MONO, 14, "bold"))
         self.symbol_box.pack(side="left", fill="x", expand=True, padx=8, ipady=3)
+        self.symbol_box.bind("<<CoinChosen>>", lambda _e: self._bump_symbol_usage(self._symbol()))
         self.side_box = ttk.Combobox(
             symbol_row, textvariable=self.side, values=("BUY", "SELL"), width=6, state="readonly", font=(SANS, 13, "bold")
         )
@@ -1780,6 +1803,7 @@ class TradingApp:
             self._kick_book(symbol)
         if symbol in self.config.get("symbols", []) and self.config.get("last_symbol") != symbol:
             self.config["last_symbol"] = symbol
+            self._touch_recent_symbol(symbol)
             self._schedule_save()
         brackets = self._brackets.get(symbol) if self.market.get() == "Futures" else None
         if brackets:
@@ -1924,34 +1948,39 @@ class TradingApp:
         self._render_top_coins()
 
     def _top_symbols(self) -> list[str]:
-        counts = self.config.get("symbol_counts")
-        if not isinstance(counts, dict):
-            counts = {}
-        saved = list(self.config.get("symbols") or [])
-        pool: list[str] = list(saved)
-        for sym in counts:
-            if sym not in pool and SYMBOL.fullmatch(str(sym)):
-                pool.append(str(sym))
-        order_index = {sym: idx for idx, sym in enumerate(pool)}
-        ranked = sorted(
-            pool,
-            key=lambda s: (-int(counts.get(s, 0) or 0), order_index.get(s, 9999)),
-        )
-        return ranked[:10]
+        recent: list[str] = []
+        for item in self.config.get("recent_symbols") or []:
+            sym = str(item).strip().upper()
+            if sym and SYMBOL.fullmatch(sym) and sym not in recent:
+                recent.append(sym)
+            if len(recent) >= RECENT_COINS:
+                break
+        if not recent:
+            current = self._symbol()
+            if current and SYMBOL.fullmatch(current):
+                recent.append(current)
+        return recent[:RECENT_COINS]
+
+    def _touch_recent_symbol(self, symbol: str) -> bool:
+        sym = symbol.strip().upper()
+        if not sym or not SYMBOL.fullmatch(sym):
+            return False
+        recent = [
+            str(item).strip().upper()
+            for item in (self.config.get("recent_symbols") or [])
+            if str(item).strip() and SYMBOL.fullmatch(str(item).strip().upper())
+        ]
+        new_recent = [sym] + [item for item in recent if item != sym]
+        new_recent = new_recent[:RECENT_COINS]
+        if recent[:RECENT_COINS] == new_recent:
+            self.config["recent_symbols"] = new_recent
+            return False
+        self.config["recent_symbols"] = new_recent
+        return True
 
     def _bump_symbol_usage(self, symbol: str) -> None:
-        sym = symbol.strip().upper()
-        if not sym:
-            return
-        counts = self.config.setdefault("symbol_counts", {})
-        if not isinstance(counts, dict):
-            counts = {}
-            self.config["symbol_counts"] = counts
-        counts[sym] = int(counts.get(sym, 0) or 0) + 1
-        try:
-            save_config(self.config)
-        except Exception:
-            pass
+        if self._touch_recent_symbol(symbol):
+            self._schedule_save()
         self._render_top_coins()
 
     def _render_top_coins(self) -> None:
@@ -1970,7 +1999,7 @@ class TradingApp:
                 cursor="hand2",
                 highlightthickness=1,
             )
-            btn.pack(side="left", padx=(0 if idx == 0 else 6, 0))
+            btn.pack(side="left", padx=(0 if idx == 0 else 4, 0))
             self._top_coin_btns.append(btn)
         while len(self._top_coin_btns) > len(top):
             self._top_coin_btns.pop().destroy()
