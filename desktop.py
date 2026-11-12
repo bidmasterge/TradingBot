@@ -2793,6 +2793,9 @@ class TradingApp:
             await client.close()
             raise
         self.client = client
+        client._on_reconnect = lambda: self.root.after(
+            0, lambda: self.log("Binance connection dropped. Reconnected.", "warn")
+        )
         self._stop_multi = False
         if market == "futures":
             try:

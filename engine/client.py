@@ -69,9 +69,13 @@ class OrderClient:
         self._offset_ms = 0
         self._ws: Any = None
         self._reader: asyncio.Task | None = None
+        self._heartbeat: asyncio.Task | None = None
         self._pending: dict[Any, asyncio.Future] = {}
         self._next_id = 1
         self._send_lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
+        self._closing = False
+        self._on_reconnect = None
 
     async def __aenter__(self) -> OrderClient:
         await self.connect()
@@ -88,12 +92,29 @@ class OrderClient:
         return time.time_ns() // 1_000_000 + self._offset_ms
 
     async def connect(self) -> None:
+        self._closing = False
+        await self._open_socket()
+        self._start_heartbeat()
+
+    async def close(self) -> None:
+        self._closing = True
+        hb = self._heartbeat
+        self._heartbeat = None
+        if hb is not None:
+            hb.cancel()
+            try:
+                await hb
+            except Exception:
+                pass
+        await self._drop_socket()
+
+    async def _open_socket(self) -> None:
         self._ws = await connect(
             self.url,
             compression=None,
             max_queue=None,
-            ping_interval=20,
-            ping_timeout=20,
+            ping_interval=15,
+            ping_timeout=15,
             open_timeout=10,
             max_size=1_048_576,
         )
@@ -104,14 +125,17 @@ class OrderClient:
             if self.signer is not None and self.signer.kind == "ed25519":
                 await self._logon()
         except Exception:
-            await self.close()
+            await self._drop_socket()
             raise
 
-    async def close(self) -> None:
+    async def _drop_socket(self) -> None:
         ws = self._ws
         self._ws = None
         if ws is not None:
-            await ws.close()
+            try:
+                await ws.close()
+            except Exception:
+                pass
         task = self._reader
         self._reader = None
         if task is not None:
@@ -120,6 +144,69 @@ class OrderClient:
             except Exception:
                 pass
         self._fail_pending()
+        self.session_authed = False
+
+    def _alive(self) -> bool:
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            state = getattr(ws, "state", None)
+            name = str(getattr(state, "name", state) or "").upper()
+            if name and name not in {"OPEN", "1"}:
+                return False
+        except Exception:
+            return False
+        reader = self._reader
+        return reader is not None and not reader.done()
+
+    def _start_heartbeat(self) -> None:
+        if self._heartbeat is None or self._heartbeat.done():
+            self._heartbeat = asyncio.create_task(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self) -> None:
+        try:
+            while not self._closing:
+                await asyncio.sleep(20)
+                if self._closing:
+                    return
+                try:
+                    if not self._alive():
+                        await self._reconnect()
+                        continue
+                    await self.call("time")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if not self._closing:
+                        try:
+                            await self._reconnect()
+                        except Exception:
+                            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            raise
+
+    async def ensure_connected(self) -> None:
+        if self._closing:
+            raise RuntimeError("not connected")
+        if self._alive():
+            return
+        await self._reconnect()
+
+    async def _reconnect(self) -> None:
+        async with self._reconnect_lock:
+            if self._closing:
+                raise RuntimeError("not connected")
+            if self._alive():
+                return
+            await self._drop_socket()
+            await self._open_socket()
+            cb = self._on_reconnect
+            if cb is not None:
+                try:
+                    cb()
+                except Exception:
+                    pass
 
     def _tune_socket(self) -> None:
         transport = getattr(self._ws, "transport", None)
@@ -139,6 +226,8 @@ class OrderClient:
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
         finally:
+            if self._ws is ws:
+                self._ws = None
             self._fail_pending()
 
     def _fail_pending(self) -> None:
@@ -148,9 +237,20 @@ class OrderClient:
             if not fut.done():
                 fut.set_exception(ConnectionError("websocket closed"))
 
+    async def _raw_result(self, method: str, params: dict[str, Any] | None = None, *, signed: bool = False) -> Any:
+        pending = await self._submit_once(method, params, signed=signed)
+        try:
+            msg = await asyncio.wait_for(asyncio.shield(pending.future), self.timeout)
+        except TimeoutError:
+            self._pending.pop(pending.req_id, None)
+            if not pending.future.done():
+                pending.future.cancel()
+            raise TimeoutError(f"{method} timed out after {self.timeout:.0f}s") from None
+        return unwrap(msg)
+
     async def sync_time(self) -> int:
         started = time.time_ns()
-        result = await self.call("time")
+        result = await self._raw_result("time")
         finished = time.time_ns()
         local_mid_ms = (started + finished) // 2 // 1_000_000
         self._offset_ms = int(result["serverTime"]) - local_mid_ms
@@ -166,7 +266,7 @@ class OrderClient:
         if self.recv_window:
             params["recvWindow"] = self.recv_window
         params["signature"] = self.signer.sign(canonical_payload(params))
-        await self.call("session.logon", params, signed=False)
+        await self._raw_result("session.logon", params, signed=False)
         self.session_authed = True
 
     def _auth_params(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -187,6 +287,22 @@ class OrderClient:
         params: dict[str, Any] | None = None,
         *,
         signed: bool = False,
+    ) -> Pending:
+        await self.ensure_connected()
+        try:
+            return await self._submit_once(method, params, signed=signed)
+        except Exception as exc:
+            if self._closing or not _looks_like_drop(exc):
+                raise
+            await self._reconnect()
+            return await self._submit_once(method, params, signed=signed)
+
+    async def _submit_once(
+        self,
+        method: str,
+        params: dict[str, Any] | None,
+        *,
+        signed: bool,
     ) -> Pending:
         if self._ws is None:
             raise RuntimeError("not connected")
@@ -365,6 +481,26 @@ class OrderClient:
 
     async def test_order(self, params: dict[str, Any]) -> dict:
         return await self.call("order.test", params, signed=True)
+
+
+def _looks_like_drop(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    text = str(exc).lower()
+    return any(
+        needle in text
+        for needle in (
+            "ping timeout",
+            "keepalive",
+            "1011",
+            "1006",
+            "close frame",
+            "websocket closed",
+            "connection closed",
+            "not connected",
+            "timed out",
+        )
+    )
 
 
 def unwrap(msg: dict) -> Any:
