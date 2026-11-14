@@ -200,6 +200,18 @@ def load_config() -> dict:
         if last and SYMBOL.fullmatch(last):
             recent = [last] + [sym for sym in recent if sym != last]
     data["recent_symbols"] = recent[:RECENT_COINS]
+    raw_lev = data.get("symbol_leverage")
+    clean_lev: dict[str, int] = {}
+    if isinstance(raw_lev, dict):
+        for key, val in raw_lev.items():
+            sym = str(key).strip().upper()
+            try:
+                n = int(val)
+            except (TypeError, ValueError):
+                continue
+            if SYMBOL.fullmatch(sym) and 1 <= n <= 125:
+                clean_lev[sym] = n
+    data["symbol_leverage"] = clean_lev
     return data
 
 
@@ -1002,6 +1014,7 @@ class TradingApp:
         self._depth_symbol: str = ""
         self._wanted_book_symbol: str = ""
         self._wanted_book_market: str = ""
+        self._lev_symbol: str = ""
         self._book_gen: int = 0
         self._save_after: str | None = None
         self._picked_book_price: str = ""
@@ -1597,7 +1610,12 @@ class TradingApp:
 
     def _set_exec_mode(self, mode: str) -> None:
         self.exec_mode.set(mode)
-        if mode == "Order" and not (self.protection.get() or self.protection_keep.get()):
+        if mode == "Trade":
+            if self.protection.get() or self.protection_keep.get():
+                self.protection.set(False)
+                self.protection_keep.set(False)
+                self._refresh_buttons()
+        elif mode == "Order" and not (self.protection.get() or self.protection_keep.get()):
             self.protection.set(True)
             self._refresh_buttons()
         self._sync_side_box()
@@ -1805,6 +1823,11 @@ class TradingApp:
             self.config["last_symbol"] = symbol
             self._touch_recent_symbol(symbol)
             self._schedule_save()
+        if symbol != self._lev_symbol:
+            self._lev_symbol = symbol
+            self._apply_coin_leverage(symbol)
+        else:
+            self._remember_coin_leverage(symbol)
         brackets = self._brackets.get(symbol) if self.market.get() == "Futures" else None
         if brackets:
             max_lev = max((int(b.get("initialLeverage") or 1) for b in brackets), default=125)
@@ -1910,6 +1933,44 @@ class TradingApp:
         if self._closing or gen != self._book_gen or self._symbol() != symbol:
             return
         self.root.after(0, lambda a=asks, b=bids, s=symbol: self._render_depth(a, b, fill_price=True, symbol=s))
+
+    def _saved_leverage(self, symbol: str) -> str:
+        saved = self.config.get("symbol_leverage")
+        if isinstance(saved, dict) and symbol in saved:
+            try:
+                n = int(saved[symbol])
+                if n >= 1:
+                    return str(n)
+            except (TypeError, ValueError):
+                pass
+        return "20"
+
+    def _apply_coin_leverage(self, symbol: str) -> None:
+        if not symbol:
+            return
+        target = self._saved_leverage(symbol)
+        if self.leverage.get().strip() != target:
+            self.leverage.set(target)
+        else:
+            self._remember_coin_leverage(symbol)
+
+    def _remember_coin_leverage(self, symbol: str) -> None:
+        if not symbol or symbol not in self.config.get("symbols", []):
+            return
+        raw = self.leverage.get().strip()
+        if not raw.isdigit():
+            return
+        n = int(raw)
+        if n < 1 or n > 125:
+            return
+        saved = self.config.get("symbol_leverage")
+        if not isinstance(saved, dict):
+            saved = {}
+            self.config["symbol_leverage"] = saved
+        if saved.get(symbol) == n:
+            return
+        saved[symbol] = n
+        self._schedule_save()
 
     def _clear_log(self) -> None:
         self.output.configure(state="normal")
