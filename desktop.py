@@ -157,6 +157,15 @@ def dec_str(value: Decimal) -> str:
     return text or "0"
 
 
+def fmt_time(value) -> str:
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    secs = ms / 1000 if ms > 10_000_000_000 else ms
+    return time.strftime("%m-%d %H:%M", time.localtime(secs))
+
+
 def quote_to_base(usdt: Decimal, price: Decimal, lot: Decimal) -> Decimal:
     if price <= 0:
         return Decimal(0)
@@ -983,6 +992,15 @@ class TradingApp:
         self._position_close_pct: dict[str, str] = {}
         self._last_order_rows: list[dict] = []
         self._last_position_rows: list[dict] = []
+        self._last_order_history: list[dict] = []
+        self._last_position_history: list[dict] = []
+        self.orders_view = "open"
+        self.positions_view = "open"
+        self._history_gen = 0
+        self._open_order_count = 0
+        self._pos_open_count = 0
+        self._order_hist_count = 0
+        self._pos_hist_count = 0
         self._brackets: dict[str, list[dict]] = {}
         self._top_coin_btns: list[tk.Button] = []
         self._rules: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
@@ -1338,13 +1356,26 @@ class TradingApp:
         orders_head = tk.Frame(orders_pane, bg=CARD)
         orders_head.pack(fill="x", padx=16, pady=(10, 4))
         tk.Label(orders_head, text="Open orders", bg=CARD, fg=FG, font=(SANS, 14, "bold")).pack(side="left")
+        self.orders_title = orders_head.winfo_children()[-1]
         self.order_count_badge = tk.Label(orders_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 12, "bold"), padx=8)
         self.order_count_badge.pack(side="left", padx=(8, 0))
+        orders_switch = tk.Frame(orders_head, bg=BORDER, padx=1, pady=1)
+        orders_switch.pack(side="left", padx=(12, 0))
+        self.orders_open_btn = tk.Button(
+            orders_switch, text="Open", command=lambda: self._show_orders_view("open"),
+            relief="flat", bd=0, padx=10, pady=2, font=(SANS, 10, "bold"), cursor="hand2",
+        )
+        self.orders_open_btn.pack(side="left")
+        self.orders_hist_btn = tk.Button(
+            orders_switch, text="History", command=lambda: self._show_orders_view("history"),
+            relief="flat", bd=0, padx=10, pady=2, font=(SANS, 10, "bold"), cursor="hand2",
+        )
+        self.orders_hist_btn.pack(side="left")
         ttk.Checkbutton(
             orders_head,
             text="Selected coin only",
             variable=self.filter_orders_symbol,
-            command=lambda: self._render_order_rows(self._last_order_rows),
+            command=self._on_orders_filter,
         ).pack(side="left", padx=(12, 0))
         self.refresh_btn = self._btn(orders_head, "Refresh", self.on_refresh, "ghost")
         self.refresh_btn.pack(side="right")
@@ -1368,6 +1399,23 @@ class TradingApp:
         self.empty_orders = tk.Label(self.tree, text="Connect to load open orders", bg=INPUT, fg=MUTED_FG, font=(SANS, 13))
         self.empty_orders.place(relx=0.5, rely=0.58, anchor="center")
         self.empty_orders.lift()
+        self.order_hist_tree = DataTable(
+            orders_pane,
+            (
+                ("time", "TIME", 120, "w"),
+                ("symbol", "SYMBOL", 115, "w"),
+                ("side", "SIDE", 75, "w"),
+                ("position", "POSITION", 95, "w"),
+                ("price", "PRICE", 115, "e"),
+                ("qty", "FILLED", 110, "e"),
+                ("status", "STATUS", 110, "w"),
+            ),
+        )
+        self.empty_order_hist = tk.Label(
+            self.order_hist_tree, text="Connect to load order history", bg=INPUT, fg=MUTED_FG, font=(SANS, 13)
+        )
+        self.empty_order_hist.place(relx=0.5, rely=0.58, anchor="center")
+        self.empty_order_hist.lift()
 
         tk.Frame(right, bg=BORDER, height=1).pack(fill="x")
         pos_pane = tk.Frame(right, bg=CARD)
@@ -1375,13 +1423,26 @@ class TradingApp:
         pos_head = tk.Frame(pos_pane, bg=CARD)
         pos_head.pack(fill="x", padx=16, pady=(8, 4))
         tk.Label(pos_head, text="Open positions", bg=CARD, fg=FG, font=(SANS, 14, "bold")).pack(side="left")
+        self.positions_title = pos_head.winfo_children()[-1]
         self.pos_count_badge = tk.Label(pos_head, text="0", bg=SECONDARY, fg=MUTED_FG, font=(MONO, 12, "bold"), padx=8)
         self.pos_count_badge.pack(side="left", padx=(8, 0))
+        pos_switch = tk.Frame(pos_head, bg=BORDER, padx=1, pady=1)
+        pos_switch.pack(side="left", padx=(12, 0))
+        self.pos_open_btn = tk.Button(
+            pos_switch, text="Open", command=lambda: self._show_positions_view("open"),
+            relief="flat", bd=0, padx=10, pady=2, font=(SANS, 10, "bold"), cursor="hand2",
+        )
+        self.pos_open_btn.pack(side="left")
+        self.pos_hist_btn = tk.Button(
+            pos_switch, text="History", command=lambda: self._show_positions_view("history"),
+            relief="flat", bd=0, padx=10, pady=2, font=(SANS, 10, "bold"), cursor="hand2",
+        )
+        self.pos_hist_btn.pack(side="left")
         ttk.Checkbutton(
             pos_head,
             text="Selected coin only",
             variable=self.filter_positions_symbol,
-            command=lambda: self._show_positions(self._last_position_rows),
+            command=self._on_positions_filter,
         ).pack(side="left", padx=(12, 0))
         self.pos_refresh_btn = self._btn(pos_head, "Refresh", self.on_refresh, "ghost")
         self.pos_refresh_btn.pack(side="right")
@@ -1409,6 +1470,24 @@ class TradingApp:
         )
         self.empty_positions.place(relx=0.5, rely=0.58, anchor="center")
         self.empty_positions.lift()
+        self.pos_hist_tree = DataTable(
+            pos_pane,
+            (
+                ("time", "TIME", 120, "w"),
+                ("symbol", "SYMBOL", 115, "w"),
+                ("side", "SIDE", 80, "w"),
+                ("qty", "QTY", 120, "e"),
+                ("price", "PRICE", 120, "e"),
+                ("pnl", "PNL (USDT)", 130, "e"),
+            ),
+        )
+        self.empty_pos_hist = tk.Label(
+            self.pos_hist_tree, text="Connect to load position history", bg=INPUT, fg=MUTED_FG, font=(SANS, 13)
+        )
+        self.empty_pos_hist.place(relx=0.5, rely=0.58, anchor="center")
+        self.empty_pos_hist.lift()
+        self._paint_orders_view()
+        self._paint_positions_view()
 
         tk.Frame(right, bg=BORDER, height=1).pack(fill="x")
         activity_head = tk.Frame(right, bg=CARD)
@@ -1823,6 +1902,10 @@ class TradingApp:
             self.config["last_symbol"] = symbol
             self._touch_recent_symbol(symbol)
             self._schedule_save()
+            self._render_order_history(self._last_order_history)
+            self._render_position_history(self._last_position_history)
+            if self.orders_view == "history" or self.positions_view == "history":
+                self._request_history()
         if symbol != self._lev_symbol:
             self._lev_symbol = symbol
             self._apply_coin_leverage(symbol)
@@ -2495,6 +2578,7 @@ class TradingApp:
             self.log("This API key must have Futures enabled. Use BOTH unless the account is in hedge mode.")
         self._refresh_buttons()
         self.spawn(self._open(), self._show_orders)
+        self._request_history()
 
     def _on_disconnected(self, _value: object) -> None:
         self.connected = False
@@ -2507,6 +2591,8 @@ class TradingApp:
         self.distance_text.set("")
         self._show_positions([])
         self._render_order_rows([])
+        self._render_order_history([])
+        self._render_position_history([])
         self._brackets = {}
         self._sync_quote()
         self.log("Disconnected.", "warn")
@@ -2650,6 +2736,7 @@ class TradingApp:
 
     def on_refresh(self) -> None:
         self.spawn(self._open(), self._show_orders)
+        self._request_history()
 
     def _show_orders(self, rows: object, announce: bool = True) -> None:
         if not isinstance(rows, list):
@@ -2745,9 +2832,9 @@ class TradingApp:
                 }
             )
         self.pos_tree.set_rows(table_rows)
-        count = len(table_rows)
-        self.pos_count_badge.configure(text=str(count))
-        if count:
+        self._pos_open_count = len(table_rows)
+        self._sync_positions_chrome()
+        if self._pos_open_count:
             self.empty_positions.place_forget()
         else:
             if not self.connected:
@@ -3301,15 +3388,270 @@ class TradingApp:
                 }
             )
         self.tree.set_rows(table_rows)
-        count = len(table_rows)
-        self.order_count_badge.configure(text=str(count))
-        if count:
+        self._open_order_count = len(table_rows)
+        self._sync_orders_chrome()
+        if self._open_order_count:
             self.empty_orders.place_forget()
         else:
             self.empty_orders.configure(text="No open orders" if self.connected else "Connect to load open orders")
             self.empty_orders.place(relx=0.5, rely=0.58, anchor="center")
             self.empty_orders.lift()
         self._refresh_book_highlight()
+
+    def _on_orders_filter(self) -> None:
+        self._render_order_rows(self._last_order_rows)
+        self._render_order_history(self._last_order_history)
+
+    def _on_positions_filter(self) -> None:
+        self._show_positions(self._last_position_rows)
+        self._render_position_history(self._last_position_history)
+
+    def _paint_view_btn(self, button: tk.Button, active: bool) -> None:
+        button.configure(
+            bg=PRIMARY if active else INPUT,
+            fg=PRIMARY_FG if active else MUTED_FG,
+            activebackground="#c9a24a" if active else MUTED,
+            activeforeground=PRIMARY_FG if active else FG,
+        )
+
+    def _paint_orders_view(self) -> None:
+        history = self.orders_view == "history"
+        self._paint_view_btn(self.orders_open_btn, not history)
+        self._paint_view_btn(self.orders_hist_btn, history)
+
+    def _paint_positions_view(self) -> None:
+        history = self.positions_view == "history"
+        self._paint_view_btn(self.pos_open_btn, not history)
+        self._paint_view_btn(self.pos_hist_btn, history)
+
+    def _sync_orders_chrome(self) -> None:
+        if not hasattr(self, "orders_title"):
+            return
+        history = self.orders_view == "history"
+        self.orders_title.configure(text="Order history" if history else "Open orders")
+        count = self._order_hist_count if history else self._open_order_count
+        self.order_count_badge.configure(text=str(count))
+
+    def _sync_positions_chrome(self) -> None:
+        if not hasattr(self, "positions_title"):
+            return
+        history = self.positions_view == "history"
+        self.positions_title.configure(text="Position history" if history else "Open positions")
+        count = self._pos_hist_count if history else self._pos_open_count
+        self.pos_count_badge.configure(text=str(count))
+
+    def _show_orders_view(self, view: str) -> None:
+        self.orders_view = view
+        if view == "history":
+            self.tree.pack_forget()
+            self.order_hist_tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+            self._request_history()
+        else:
+            self.order_hist_tree.pack_forget()
+            self.tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self._paint_orders_view()
+        self._sync_orders_chrome()
+
+    def _show_positions_view(self, view: str) -> None:
+        self.positions_view = view
+        if view == "history":
+            self.pos_tree.pack_forget()
+            self.pos_hist_tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+            self._request_history()
+        else:
+            self.pos_hist_tree.pack_forget()
+            self.pos_tree.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self._paint_positions_view()
+        self._sync_positions_chrome()
+
+    def _history_symbols(self) -> list[str]:
+        symbols: list[str] = []
+        current = self._symbol()
+        if current and SYMBOL.fullmatch(current):
+            symbols.append(current)
+        for item in self.config.get("recent_symbols") or []:
+            sym = str(item).strip().upper()
+            if SYMBOL.fullmatch(sym) and sym not in symbols:
+                symbols.append(sym)
+            if len(symbols) >= 6:
+                break
+        return symbols
+
+    def _request_history(self) -> None:
+        if self._closing or not self.connected or self.client is None or not self.loop.is_running():
+            return
+        symbols = self._history_symbols()
+        if not symbols:
+            self._render_order_history([])
+            self._render_position_history([])
+            return
+        self._history_gen += 1
+        gen = self._history_gen
+        asyncio.run_coroutine_threadsafe(self._fetch_history(symbols, gen), self.loop)
+
+    async def _fetch_history(self, symbols: list[str], gen: int) -> None:
+        client = self.client
+        if client is None:
+            return
+        orders: list | Exception
+        positions: list | Exception
+        try:
+            orders = await client.order_history(symbols)
+        except Exception as exc:
+            orders = exc
+        try:
+            positions = await client.position_history(symbols)
+        except Exception as exc:
+            positions = exc
+
+        def apply() -> None:
+            if self._closing or gen != self._history_gen:
+                return
+            if isinstance(orders, list):
+                self._render_order_history(orders)
+            elif self.orders_view == "history":
+                self.log(f"Order history: {orders}")
+            if isinstance(positions, list):
+                self._render_position_history(positions)
+            elif self.positions_view == "history":
+                self.log(f"Position history: {positions}")
+
+        self.root.after(0, apply)
+
+    def _passes_symbol_filter(self, symbol: str, selected_only: bool) -> bool:
+        active = self._symbol()
+        return not (selected_only and active and symbol != active)
+
+    def _render_order_history(self, rows: list) -> None:
+        self._last_order_history = list(rows)
+        if not hasattr(self, "order_hist_tree"):
+            return
+        only_sym = bool(self.filter_orders_symbol.get())
+        table_rows: list[dict] = []
+        for row in rows:
+            status = str(row.get("status") or "")
+            if status == "NEW":
+                continue
+            sym = str(row.get("symbol") or "")
+            if not self._passes_symbol_filter(sym, only_sym):
+                continue
+            side = str(row.get("side") or "")
+            filled = row.get("executedQty") or row.get("origQty") or ""
+            try:
+                filled = dec_str(Decimal(str(filled)))
+            except Exception:
+                filled = str(filled)
+            price = row.get("price") or "0"
+            avg = row.get("avgPrice") or "0"
+            try:
+                px = Decimal(str(price))
+                if px <= 0:
+                    px = Decimal(str(avg))
+                price = dec_str(px) if px > 0 else "—"
+            except Exception:
+                price = str(row.get("price") or "—")
+            status_color = {"FILLED": BUY, "CANCELED": SELL, "EXPIRED": MUTED_FG, "REJECTED": SELL}.get(status, FG)
+            table_rows.append(
+                {
+                    "values": (
+                        fmt_time(row.get("updateTime") or row.get("time")),
+                        sym,
+                        side,
+                        row.get("positionSide") or "—",
+                        price,
+                        filled,
+                        status,
+                    ),
+                    "colors": {2: BUY if side == "BUY" else SELL, 6: status_color},
+                }
+            )
+        self.order_hist_tree.set_rows(table_rows[:100])
+        self._order_hist_count = len(table_rows[:100])
+        self._sync_orders_chrome()
+        if self._order_hist_count:
+            self.empty_order_hist.place_forget()
+        else:
+            if not self.connected:
+                msg = "Connect to load order history"
+            else:
+                msg = "No order history"
+            self.empty_order_hist.configure(text=msg)
+            self.empty_order_hist.place(relx=0.5, rely=0.58, anchor="center")
+            self.empty_order_hist.lift()
+
+    def _render_position_history(self, rows: list) -> None:
+        self._last_position_history = list(rows)
+        if not hasattr(self, "pos_hist_tree"):
+            return
+        only_sym = bool(self.filter_positions_symbol.get())
+        futures = self.market.get() == "Futures"
+        table_rows: list[dict] = []
+        for row in rows:
+            sym = str(row.get("symbol") or "")
+            if not self._passes_symbol_filter(sym, only_sym):
+                continue
+            try:
+                pnl = Decimal(str(row.get("realizedPnl") or "0"))
+            except Exception:
+                pnl = Decimal(0)
+            if futures and pnl == 0:
+                continue
+            side = str(row.get("side") or "")
+            pos_side = str(row.get("positionSide") or "")
+            if futures:
+                if pos_side in {"LONG", "SHORT"}:
+                    side_label = pos_side
+                elif side == "SELL":
+                    side_label = "LONG"
+                elif side == "BUY":
+                    side_label = "SHORT"
+                else:
+                    side_label = side or "—"
+                result = f"{pnl:+,.2f}"
+                result_color = BUY if pnl >= 0 else SELL
+            else:
+                side_label = side or "—"
+                try:
+                    result = f"{Decimal(str(row.get('quoteQty') or '0')):,.2f}"
+                except Exception:
+                    result = "—"
+                result_color = FG
+            try:
+                qty = dec_str(Decimal(str(row.get("qty") or "0")))
+            except Exception:
+                qty = str(row.get("qty") or "")
+            try:
+                price = dec_str(Decimal(str(row.get("price") or "0")))
+            except Exception:
+                price = str(row.get("price") or "")
+            table_rows.append(
+                {
+                    "values": (
+                        fmt_time(row.get("time")),
+                        sym,
+                        side_label,
+                        qty,
+                        price,
+                        result,
+                    ),
+                    "colors": {2: BUY if side_label in {"BUY", "LONG"} else SELL, 5: result_color},
+                }
+            )
+        self.pos_hist_tree.set_rows(table_rows[:100])
+        self._pos_hist_count = len(table_rows[:100])
+        self._sync_positions_chrome()
+        if self._pos_hist_count:
+            self.empty_pos_hist.place_forget()
+        else:
+            if not self.connected:
+                msg = "Connect to load position history"
+            elif futures:
+                msg = "No closed positions"
+            else:
+                msg = "No trade history"
+            self.empty_pos_hist.configure(text=msg)
+            self.empty_pos_hist.place(relx=0.5, rely=0.58, anchor="center")
+            self.empty_pos_hist.lift()
 
     async def _account_sync_loop(self) -> None:
         try:

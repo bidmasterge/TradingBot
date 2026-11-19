@@ -365,9 +365,16 @@ class OrderClient:
         return await self.call("order.cancel", params, signed=True)
 
     def _futures_rest_sync(self, http_method: str, path: str, params: dict[str, Any]) -> Any:
+        host = "https://testnet.binancefuture.com" if self.testnet else "https://fapi.binance.com"
+        return self._signed_rest_sync(host, http_method, path, params)
+
+    def _spot_rest_sync(self, http_method: str, path: str, params: dict[str, Any]) -> Any:
+        host = "https://testnet.binance.vision" if self.testnet else "https://api.binance.com"
+        return self._signed_rest_sync(host, http_method, path, params)
+
+    def _signed_rest_sync(self, host: str, http_method: str, path: str, params: dict[str, Any]) -> Any:
         if self.signer is None:
             raise RuntimeError("Not connected")
-        host = "https://testnet.binancefuture.com" if self.testnet else "https://fapi.binance.com"
         signed_params: dict[str, Any] = dict(params)
         signed_params["recvWindow"] = self.recv_window
         signed_params["timestamp"] = self.timestamp_ms()
@@ -396,6 +403,30 @@ class OrderClient:
             except orjson.JSONDecodeError:
                 raise BinanceError(exc.code, None, raw.decode(errors="replace")[:200]) from exc
             raise BinanceError(exc.code, payload.get("code"), str(payload.get("msg") or payload)) from exc
+
+    async def _history_for(self, path_futures: str, path_spot: str, symbols: list[str], limit: int) -> list:
+        rest = self._futures_rest_sync if self.market == "futures" else self._spot_rest_sync
+        path = path_futures if self.market == "futures" else path_spot
+        rows: list = []
+        last_error: Exception | None = None
+        for symbol in symbols:
+            try:
+                result = await asyncio.to_thread(rest, "GET", path, {"symbol": symbol, "limit": limit})
+            except Exception as exc:
+                last_error = exc
+                continue
+            if isinstance(result, list):
+                rows.extend(result)
+        if not rows and last_error is not None:
+            raise last_error
+        rows.sort(key=lambda row: int(row.get("updateTime") or row.get("time") or 0), reverse=True)
+        return rows[:150]
+
+    async def order_history(self, symbols: list[str], limit: int = 40) -> list:
+        return await self._history_for("/fapi/v1/allOrders", "/api/v3/allOrders", symbols, limit)
+
+    async def position_history(self, symbols: list[str], limit: int = 50) -> list:
+        return await self._history_for("/fapi/v1/userTrades", "/api/v3/myTrades", symbols, limit)
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:
         return await asyncio.to_thread(
