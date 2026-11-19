@@ -24,7 +24,7 @@ import urllib.request
 import zipfile
 
 import orjson
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -157,6 +157,24 @@ def dec_str(value: Decimal) -> str:
     return text or "0"
 
 
+def price_places(value) -> int:
+    text = str(value).strip()
+    if not text or text == "—":
+        return 0
+    if "." not in text:
+        return 0
+    return len(text.split(".", 1)[1].rstrip("0"))
+
+
+def book_price(value: Decimal, places: int | None = None) -> str:
+    if value <= 0:
+        return "—"
+    if places is not None:
+        places = max(0, min(int(places), 8))
+        value = value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return dec_str(value)
+
+
 def closed_positions(trades: list[dict]) -> list[dict]:
     """Turn fills into closed positions: one row per close, with entry and exit."""
     groups: dict[tuple[str, str], list[dict]] = {}
@@ -171,6 +189,7 @@ def closed_positions(trades: list[dict]) -> list[dict]:
         items.sort(key=lambda item: (int(item.get("time") or 0), int(item.get("id") or 0)))
         pos = Decimal(0)
         avg = Decimal(0)
+        places = 0
         pending: dict | None = None
 
         def flush() -> None:
@@ -188,6 +207,7 @@ def closed_positions(trades: list[dict]) -> list[dict]:
                     "close": pending["cost"] / qty,
                     "pnl": pending["pnl"],
                     "time": pending["time"],
+                    "places": pending["places"],
                 }
             )
             pending = None
@@ -201,6 +221,7 @@ def closed_positions(trades: list[dict]) -> list[dict]:
                 continue
             if qty <= 0:
                 continue
+            places = max(places, price_places(row.get("price")))
             when = int(row.get("time") or 0)
             order_side = str(row.get("side") or "")
             delta = qty if order_side == "BUY" else -qty
@@ -221,11 +242,13 @@ def closed_positions(trades: list[dict]) -> list[dict]:
                         "time": when,
                         "entry": Decimal(0),
                         "known": False,
+                        "places": places,
                     }
                 pending["qty"] += qty
                 pending["cost"] += price * qty
                 pending["pnl"] += pnl
                 pending["time"] = when
+                pending["places"] = max(pending["places"], places)
                 continue
             if pos == 0 or (pos > 0 and delta > 0) or (pos < 0 and delta < 0):
                 flush()
@@ -247,11 +270,13 @@ def closed_positions(trades: list[dict]) -> list[dict]:
                     "time": when,
                     "entry": avg,
                     "known": avg > 0,
+                    "places": places,
                 }
             pending["qty"] += close_qty
             pending["cost"] += price * close_qty
             pending["pnl"] += pnl
             pending["time"] = when
+            pending["places"] = max(pending["places"], places)
             pos = pos + delta
             if pos == 0 or (label == "LONG" and pos < 0) or (label == "SHORT" and pos > 0):
                 flush()
@@ -3630,11 +3655,37 @@ class TradingApp:
         active = self._symbol()
         return not (selected_only and active and symbol != active)
 
+    def _price_places_for(self, symbol: str) -> int | None:
+        """Decimal places the order book uses for this coin."""
+        rules = self._rules.get((self.market.get(), symbol))
+        if rules and rules[0] > 0:
+            return price_places(format(rules[0], "f"))
+        if symbol and symbol == getattr(self, "_depth_symbol", "") and hasattr(self, "ask_rows"):
+            found: int | None = None
+            for _row, _dot, px_lbl, _tot in self.ask_rows + self.bid_rows:
+                text = px_lbl.cget("text").strip()
+                if not text or text == "—":
+                    continue
+                found = price_places(text) if found is None else max(found, price_places(text))
+            if found is not None:
+                return found
+        return None
+
     def _render_order_history(self, rows: list) -> None:
         self._last_order_history = list(rows)
         if not hasattr(self, "order_hist_tree"):
             return
         only_sym = bool(self.filter_orders_symbol.get())
+        known_places: dict[str, int] = {}
+        for row in rows:
+            sym = str(row.get("symbol") or "")
+            raw = str(row.get("price") or "0")
+            try:
+                if Decimal(raw) <= 0:
+                    continue
+            except Exception:
+                continue
+            known_places[sym] = max(known_places.get(sym, 0), price_places(raw))
         table_rows: list[dict] = []
         for row in rows:
             status = str(row.get("status") or "")
@@ -3655,7 +3706,10 @@ class TradingApp:
                 px = Decimal(str(price))
                 if px <= 0:
                     px = Decimal(str(avg))
-                price = dec_str(px) if px > 0 else "—"
+                places = self._price_places_for(sym)
+                if places is None and sym in known_places:
+                    places = known_places[sym]
+                price = book_price(px, places)
             except Exception:
                 price = str(row.get("price") or "—")
             status_color = {"FILLED": BUY, "CANCELED": SELL, "EXPIRED": MUTED_FG, "REJECTED": SELL}.get(status, FG)
@@ -3704,7 +3758,11 @@ class TradingApp:
                 qty = row.get("qty") if isinstance(row.get("qty"), Decimal) else Decimal(0)
                 entry = row.get("entry")
                 close_px = row.get("close") if isinstance(row.get("close"), Decimal) else Decimal(0)
-                entry_text = dec_str(entry) if isinstance(entry, Decimal) and entry > 0 else "—"
+                places = self._price_places_for(sym)
+                if places is None and row.get("places") is not None:
+                    places = int(row["places"])
+                entry_text = book_price(entry, places) if isinstance(entry, Decimal) else "—"
+                close_text = book_price(close_px, places) if isinstance(close_px, Decimal) else "—"
                 table_rows.append(
                     {
                         "values": (
@@ -3713,7 +3771,7 @@ class TradingApp:
                             side_label,
                             dec_str(qty),
                             entry_text,
-                            dec_str(close_px) if close_px > 0 else "—",
+                            close_text,
                             f"{pnl:+,.2f}",
                         ),
                         "colors": {
