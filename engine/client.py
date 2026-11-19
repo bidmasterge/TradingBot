@@ -425,8 +425,41 @@ class OrderClient:
     async def order_history(self, symbols: list[str], limit: int = 40) -> list:
         return await self._history_for("/fapi/v1/allOrders", "/api/v3/allOrders", symbols, limit)
 
-    async def position_history(self, symbols: list[str], limit: int = 50) -> list:
-        return await self._history_for("/fapi/v1/userTrades", "/api/v3/myTrades", symbols, limit)
+    async def position_history(self, symbols: list[str]) -> list:
+        """Futures fills for the last 14 days, used to rebuild closed positions."""
+        if self.market != "futures":
+            return []
+        now_ms = int(time.time() * 1000)
+        week = 7 * 24 * 60 * 60 * 1000
+        start = now_ms - 14 * 24 * 60 * 60 * 1000
+        rows: list = []
+        seen: set[tuple] = set()
+        last_error: Exception | None = None
+        for symbol in symbols:
+            cursor = start
+            while cursor < now_ms:
+                end = min(cursor + week - 1, now_ms)
+                try:
+                    result = await asyncio.to_thread(
+                        self._futures_rest_sync,
+                        "GET",
+                        "/fapi/v1/userTrades",
+                        {"symbol": symbol, "startTime": cursor, "endTime": end, "limit": 1000},
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    break
+                if isinstance(result, list):
+                    for row in result:
+                        key = (symbol, row.get("id"))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        rows.append(row)
+                cursor = end + 1
+        if not rows and last_error is not None:
+            raise last_error
+        return rows
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:
         return await asyncio.to_thread(

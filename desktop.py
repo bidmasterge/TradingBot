@@ -157,6 +157,113 @@ def dec_str(value: Decimal) -> str:
     return text or "0"
 
 
+def closed_positions(trades: list[dict]) -> list[dict]:
+    """Turn fills into closed positions: one row per close, with entry and exit."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in trades:
+        sym = str(row.get("symbol") or "")
+        if not sym:
+            continue
+        side_mode = str(row.get("positionSide") or "BOTH") or "BOTH"
+        groups.setdefault((sym, side_mode), []).append(row)
+    closed: list[dict] = []
+    for (sym, side_mode), items in groups.items():
+        items.sort(key=lambda item: (int(item.get("time") or 0), int(item.get("id") or 0)))
+        pos = Decimal(0)
+        avg = Decimal(0)
+        pending: dict | None = None
+
+        def flush() -> None:
+            nonlocal pending
+            if pending is None or pending["qty"] <= 0:
+                pending = None
+                return
+            qty = pending["qty"]
+            closed.append(
+                {
+                    "symbol": sym,
+                    "side": pending["side"],
+                    "qty": qty,
+                    "entry": pending["entry"] if pending["known"] and pending["entry"] > 0 else None,
+                    "close": pending["cost"] / qty,
+                    "pnl": pending["pnl"],
+                    "time": pending["time"],
+                }
+            )
+            pending = None
+
+        for row in items:
+            try:
+                qty = Decimal(str(row.get("qty") or "0"))
+                price = Decimal(str(row.get("price") or "0"))
+                pnl = Decimal(str(row.get("realizedPnl") or "0"))
+            except Exception:
+                continue
+            if qty <= 0:
+                continue
+            when = int(row.get("time") or 0)
+            order_side = str(row.get("side") or "")
+            delta = qty if order_side == "BUY" else -qty
+            order_id = row.get("orderId")
+            if pos == 0 and pnl != 0:
+                if side_mode in {"LONG", "SHORT"}:
+                    label = side_mode
+                else:
+                    label = "LONG" if order_side == "SELL" else "SHORT"
+                if pending is None or pending["orderId"] != order_id:
+                    flush()
+                    pending = {
+                        "orderId": order_id,
+                        "side": label,
+                        "qty": Decimal(0),
+                        "cost": Decimal(0),
+                        "pnl": Decimal(0),
+                        "time": when,
+                        "entry": Decimal(0),
+                        "known": False,
+                    }
+                pending["qty"] += qty
+                pending["cost"] += price * qty
+                pending["pnl"] += pnl
+                pending["time"] = when
+                continue
+            if pos == 0 or (pos > 0 and delta > 0) or (pos < 0 and delta < 0):
+                flush()
+                new_pos = pos + delta
+                if new_pos != 0:
+                    avg = price if pos == 0 else (avg * abs(pos) + price * abs(delta)) / abs(new_pos)
+                pos = new_pos
+                continue
+            close_qty = min(abs(delta), abs(pos))
+            label = side_mode if side_mode in {"LONG", "SHORT"} else ("LONG" if pos > 0 else "SHORT")
+            if pending is None or pending["orderId"] != order_id:
+                flush()
+                pending = {
+                    "orderId": order_id,
+                    "side": label,
+                    "qty": Decimal(0),
+                    "cost": Decimal(0),
+                    "pnl": Decimal(0),
+                    "time": when,
+                    "entry": avg,
+                    "known": avg > 0,
+                }
+            pending["qty"] += close_qty
+            pending["cost"] += price * close_qty
+            pending["pnl"] += pnl
+            pending["time"] = when
+            pos = pos + delta
+            if pos == 0 or (label == "LONG" and pos < 0) or (label == "SHORT" and pos > 0):
+                flush()
+                if pos != 0:
+                    avg = price
+                else:
+                    avg = Decimal(0)
+        flush()
+    closed.sort(key=lambda item: int(item.get("time") or 0), reverse=True)
+    return closed
+
+
 def fmt_time(value) -> str:
     try:
         ms = int(value)
@@ -1473,12 +1580,13 @@ class TradingApp:
         self.pos_hist_tree = DataTable(
             pos_pane,
             (
-                ("time", "TIME", 120, "w"),
-                ("symbol", "SYMBOL", 115, "w"),
-                ("side", "SIDE", 80, "w"),
-                ("qty", "QTY", 120, "e"),
-                ("price", "PRICE", 120, "e"),
-                ("pnl", "PNL (USDT)", 130, "e"),
+                ("time", "TIME", 115, "w"),
+                ("symbol", "SYMBOL", 105, "w"),
+                ("side", "SIDE", 70, "w"),
+                ("qty", "CLOSED", 100, "e"),
+                ("entry", "ENTRY", 110, "e"),
+                ("close", "CLOSE", 110, "e"),
+                ("pnl", "PNL (USDT)", 120, "e"),
             ),
         )
         self.empty_pos_hist = tk.Label(
@@ -3586,57 +3694,34 @@ class TradingApp:
         only_sym = bool(self.filter_positions_symbol.get())
         futures = self.market.get() == "Futures"
         table_rows: list[dict] = []
-        for row in rows:
-            sym = str(row.get("symbol") or "")
-            if not self._passes_symbol_filter(sym, only_sym):
-                continue
-            try:
-                pnl = Decimal(str(row.get("realizedPnl") or "0"))
-            except Exception:
-                pnl = Decimal(0)
-            if futures and pnl == 0:
-                continue
-            side = str(row.get("side") or "")
-            pos_side = str(row.get("positionSide") or "")
-            if futures:
-                if pos_side in {"LONG", "SHORT"}:
-                    side_label = pos_side
-                elif side == "SELL":
-                    side_label = "LONG"
-                elif side == "BUY":
-                    side_label = "SHORT"
-                else:
-                    side_label = side or "—"
-                result = f"{pnl:+,.2f}"
-                result_color = BUY if pnl >= 0 else SELL
-            else:
-                side_label = side or "—"
-                try:
-                    result = f"{Decimal(str(row.get('quoteQty') or '0')):,.2f}"
-                except Exception:
-                    result = "—"
-                result_color = FG
-            try:
-                qty = dec_str(Decimal(str(row.get("qty") or "0")))
-            except Exception:
-                qty = str(row.get("qty") or "")
-            try:
-                price = dec_str(Decimal(str(row.get("price") or "0")))
-            except Exception:
-                price = str(row.get("price") or "")
-            table_rows.append(
-                {
-                    "values": (
-                        fmt_time(row.get("time")),
-                        sym,
-                        side_label,
-                        qty,
-                        price,
-                        result,
-                    ),
-                    "colors": {2: BUY if side_label in {"BUY", "LONG"} else SELL, 5: result_color},
-                }
-            )
+        if futures:
+            for row in closed_positions(rows):
+                sym = str(row.get("symbol") or "")
+                if not self._passes_symbol_filter(sym, only_sym):
+                    continue
+                side_label = str(row.get("side") or "—")
+                pnl = row.get("pnl") if isinstance(row.get("pnl"), Decimal) else Decimal(0)
+                qty = row.get("qty") if isinstance(row.get("qty"), Decimal) else Decimal(0)
+                entry = row.get("entry")
+                close_px = row.get("close") if isinstance(row.get("close"), Decimal) else Decimal(0)
+                entry_text = dec_str(entry) if isinstance(entry, Decimal) and entry > 0 else "—"
+                table_rows.append(
+                    {
+                        "values": (
+                            fmt_time(row.get("time")),
+                            sym,
+                            side_label,
+                            dec_str(qty),
+                            entry_text,
+                            dec_str(close_px) if close_px > 0 else "—",
+                            f"{pnl:+,.2f}",
+                        ),
+                        "colors": {
+                            2: BUY if side_label == "LONG" else SELL,
+                            6: BUY if pnl >= 0 else SELL,
+                        },
+                    }
+                )
         self.pos_hist_tree.set_rows(table_rows[:100])
         self._pos_hist_count = len(table_rows[:100])
         self._sync_positions_chrome()
@@ -3645,10 +3730,10 @@ class TradingApp:
         else:
             if not self.connected:
                 msg = "Connect to load position history"
-            elif futures:
-                msg = "No closed positions"
+            elif not futures:
+                msg = "Position history is for Futures"
             else:
-                msg = "No trade history"
+                msg = "No closed positions"
             self.empty_pos_hist.configure(text=msg)
             self.empty_pos_hist.place(relx=0.5, rely=0.58, anchor="center")
             self.empty_pos_hist.lift()
